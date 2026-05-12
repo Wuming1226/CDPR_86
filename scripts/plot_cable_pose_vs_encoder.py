@@ -50,7 +50,7 @@ class CablePoseVsEncoderPlot:
         self.buf_geom = RollingBuffer(self.window_sec, dim=8)
         self.buf_enc = RollingBuffer(self.window_sec, dim=8)
 
-        rospy.loginfo("Initializing CDPR (waits for motor_pos)...")
+        rospy.loginfo("Initializing CDPR (waits for motor_pos_rel)...")
         self.cdpr = CDPR(imu_active=imu_active, imu_topic=imu_topic)
         rospy.loginfo("CDPR ready.")
 

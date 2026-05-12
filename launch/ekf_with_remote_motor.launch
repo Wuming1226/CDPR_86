@@ -20,7 +20,7 @@
   <arg name="stop_remote2_on_shutdown" default="true" />
 
   <!-- Readiness check -->
-  <arg name="motor_topic" default="/motor_pos" />
+  <arg name="motor_topic" default="/motor_pos_rel" />
   <arg name="motor_topic_wait_timeout" default="5.0" />
   <arg name="remote2_imu_topic" default="/imu" />
   <arg name="remote2_imu_wait_timeout" default="5.0" />

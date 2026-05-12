@@ -11,13 +11,15 @@ window of pose/IMU/encoder data and appends one line to a txt file:
 Default topics:
     /vrpn_client_node/cdpr/pose    geometry_msgs/PoseStamped
     /imu                          sensor_msgs/Imu
-    /motor_pos                    std_msgs/Float32MultiArray
+    /motor_pos_rel                std_msgs/Float32MultiArray
+    /motor_pos_abs                std_msgs/Float32MultiArray
 
 Stop with Ctrl-C.
 """
 
 from collections import deque
 import argparse
+import json
 import math
 import threading
 from pathlib import Path
@@ -72,26 +74,28 @@ class CDPRCalibrationRecorder:
         pose_topic: str,
         imu_topic: str,
         motor_topic: str,
+        motor_abs_topic: str,
+        init_motor_window_sec: float,
         angle_degrees: bool,
     ):
         self.output_path = output_path
         self.window_sec = float(window_sec)
-        self.keep_sec = max(2.0 * self.window_sec, self.window_sec + 1.0)
+        self.init_motor_window_sec = float(init_motor_window_sec)
+        self.keep_sec = max(2.0 * self.window_sec, self.window_sec + 1.0, self.init_motor_window_sec + 1.0)
         self.angle_degrees = bool(angle_degrees)
 
         self.lock = threading.Lock()
         self.pose_buf: Deque[Tuple[float, np.ndarray]] = deque()
         self.imu_buf: Deque[Tuple[float, np.ndarray]] = deque()
         self.motor_buf: Deque[Tuple[float, np.ndarray]] = deque()
+        self.motor_abs_buf: Deque[Tuple[float, np.ndarray]] = deque()
 
         rospy.Subscriber(pose_topic, PoseStamped, self.pose_callback, queue_size=200)
         rospy.Subscriber(imu_topic, Imu, self.imu_callback, queue_size=200)
         rospy.Subscriber(motor_topic, Float32MultiArray, self.motor_callback, queue_size=200)
+        rospy.Subscriber(motor_abs_topic, Float32MultiArray, self.motor_abs_callback, queue_size=200)
 
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.output_path.exists():
-            with self.output_path.open("w", encoding="utf-8") as f:
-                f.write("# x y z yaw pitch roll theta1 theta2 theta3 theta4 theta5 theta6 theta7 theta8\n")
 
     def pose_callback(self, msg: PoseStamped) -> None:
         stamp = self.message_time(msg.header.stamp)
@@ -128,12 +132,23 @@ class CDPRCalibrationRecorder:
         stamp = rospy.Time.now().to_sec()
         theta = np.asarray(msg.data, dtype=float).reshape(-1)
         if theta.size < N_CABLES:
-            rospy.logwarn_throttle(2.0, "motor_pos has %d values, expected at least %d.", theta.size, N_CABLES)
+            rospy.logwarn_throttle(2.0, "motor_pos_rel has %d values, expected at least %d.", theta.size, N_CABLES)
             return
         theta = theta[:N_CABLES]
         with self.lock:
             self.motor_buf.append((stamp, theta))
             trim_buffer(self.motor_buf, stamp, self.keep_sec)
+
+    def motor_abs_callback(self, msg: Float32MultiArray) -> None:
+        stamp = rospy.Time.now().to_sec()
+        theta = np.asarray(msg.data, dtype=float).reshape(-1)
+        if theta.size < N_CABLES:
+            rospy.logwarn_throttle(2.0, "motor_pos_abs has %d values, expected at least %d.", theta.size, N_CABLES)
+            return
+        theta = theta[:N_CABLES]
+        with self.lock:
+            self.motor_abs_buf.append((stamp, theta))
+            trim_buffer(self.motor_abs_buf, stamp, self.keep_sec)
 
     @staticmethod
     def message_time(stamp: rospy.Time) -> float:
@@ -147,11 +162,51 @@ class CDPRCalibrationRecorder:
         rate = rospy.Rate(20.0)
         while not rospy.is_shutdown():
             with self.lock:
-                ready = bool(self.pose_buf and self.imu_buf and self.motor_buf)
+                ready = bool(self.pose_buf and self.imu_buf and self.motor_buf and self.motor_abs_buf)
             if ready:
                 return
-            rospy.loginfo_throttle(2.0, "Waiting for pose, imu and motor_pos messages...")
+            rospy.loginfo_throttle(2.0, "Waiting for pose, imu, motor_pos_rel and motor_pos_abs messages...")
             rate.sleep()
+
+    def record_initial_motor_pos_abs(self) -> np.ndarray:
+        """Average motor_pos_abs at startup and store it as file metadata."""
+        start = rospy.Time.now().to_sec()
+        end = start + self.init_motor_window_sec
+        rospy.loginfo("Averaging motor_pos_abs for %.2f s...", self.init_motor_window_sec)
+        while not rospy.is_shutdown() and rospy.Time.now().to_sec() < end:
+            rospy.sleep(0.01)
+
+        end = rospy.Time.now().to_sec()
+        with self.lock:
+            motor_abs_values = values_in_window(self.motor_abs_buf, start, end)
+
+        if motor_abs_values.size == 0:
+            raise RuntimeError("No motor_pos_abs data in initial averaging window.")
+
+        init_motor_pos_abs = np.mean(motor_abs_values, axis=0)
+        rospy.loginfo("Initial motor_pos_abs averaged from %d samples.", motor_abs_values.shape[0])
+        return init_motor_pos_abs
+
+    def write_header_if_needed(self, init_motor_pos_abs: np.ndarray) -> None:
+        """Create a new txt file with metadata first, then the column header."""
+        if self.output_path.exists() and self.output_path.stat().st_size > 0:
+            rospy.logwarn(
+                "%s already exists; keeping existing header and appending samples. "
+                "If you need a new init_motor_pos_abs metadata line, record to a new file.",
+                self.output_path,
+            )
+            return
+
+        metadata = {
+            "init_motor_pos_abs": init_motor_pos_abs.tolist(),
+            "init_motor_pos_abs_window_sec": self.init_motor_window_sec,
+            "angle_unit": "deg" if self.angle_degrees else "rad",
+            "theta_topic": "motor_pos_rel",
+            "init_motor_topic": "motor_pos_abs",
+        }
+        with self.output_path.open("w", encoding="utf-8") as f:
+            f.write(f"# cdpr_calib_metadata {json.dumps(metadata, separators=(',', ':'))}\n")
+            f.write("# x y z yaw pitch roll theta1 theta2 theta3 theta4 theta5 theta6 theta7 theta8\n")
 
     def record_once(self) -> bool:
         """
@@ -206,6 +261,8 @@ class CDPRCalibrationRecorder:
 
     def run(self) -> None:
         self.wait_for_initial_data()
+        init_motor_pos_abs = self.record_initial_motor_pos_abs()
+        self.write_header_if_needed(init_motor_pos_abs)
         rospy.loginfo(
             "Ready. Move CDPR, ensure all cables are taut, then press Enter to record a %.2f s average. Ctrl-C to stop.",
             self.window_sec,
@@ -231,7 +288,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window", type=float, default=2.0, help="Averaging window width in seconds.")
     parser.add_argument("--pose-topic", default="/vrpn_client_node/cdpr/pose", help="Mocap pose topic.")
     parser.add_argument("--imu-topic", default="/imu", help="IMU topic.")
-    parser.add_argument("--motor-topic", default="/motor_pos", help="Motor encoder topic.")
+    parser.add_argument("--motor-topic", default="/motor_pos_rel", help="Motor encoder topic.")
+    parser.add_argument("--motor-abs-topic", default="/motor_pos_abs", help="Absolute motor encoder topic for init metadata.")
+    parser.add_argument("--init-motor-window", type=float, default=2.0, help="Initial motor_pos_abs averaging window in seconds.")
     parser.add_argument(
         "--angle-degrees",
         action="store_true",
@@ -249,6 +308,8 @@ def main() -> None:
         pose_topic=args.pose_topic,
         imu_topic=args.imu_topic,
         motor_topic=args.motor_topic,
+        motor_abs_topic=args.motor_abs_topic,
+        init_motor_window_sec=args.init_motor_window,
         angle_degrees=args.angle_degrees,
     )
     recorder.run()

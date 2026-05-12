@@ -32,6 +32,8 @@ Makefile
 *.db3
 *.csv
 *.tsv
+*.txt
+*.json
 *.npy
 *.npz
 *.pkl

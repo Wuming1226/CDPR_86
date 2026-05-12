@@ -102,7 +102,7 @@ class CDPR:
         self.motor_pos = np.array([0, 0, 0, 0, 0, 0, 0, 0], dtype=float)
         self.init_motor_pos = np.array([0, 0, 0, 0, 0, 0, 0, 0], dtype=float)
         self._motor_pos_received = False
-        rospy.Subscriber('motor_pos', Float32MultiArray, self._motor_pos_callback, queue_size=1)
+        rospy.Subscriber('motor_pos_rel', Float32MultiArray, self._motor_pos_callback, queue_size=1)
         while not rospy.is_shutdown() and not self._motor_pos_received:
             rospy.sleep(0.01)
         self.init_motor_pos = self.motor_pos.copy()

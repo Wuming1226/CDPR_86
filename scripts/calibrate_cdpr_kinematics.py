@@ -5,6 +5,9 @@ Calibrate CDPR kinematic parameters from mocap, IMU Euler angles and encoders.
 Data file format, one sample per line:
     x y z yaw pitch roll theta1 theta2 ... theta8
 
+Optional metadata line, usually written by record_cdpr_calib_data.py:
+    # cdpr_calib_metadata {"init_motor_pos_abs":[...]}
+
 The script estimates 57 parameters:
     l0      : 8 cable original lengths
     a       : 8 frame anchor points in world/base coordinates, shape (8, 3)
@@ -12,7 +15,10 @@ The script estimates 57 parameters:
     yaw0    : IMU initial heading offset
 
 Kinematic model for cable i at sample k:
-    residual_i = ||a_i - Rz(yaw + yaw0) Ry(pitch) Rx(roll) b_i - p|| - l0_i - r theta_i
+    residual_i = ||a_i - Rz(yaw + yaw0) Ry(pitch) Rx(roll) b_i - p|| - l0_i - s_i r theta_i
+
+Motor sign convention follows cdpr.py:
+    s = [-1, +1, -1, +1, -1, +1, -1, +1]
 
 Euler convention:
     The input line stores Euler angles as yaw, pitch, roll.
@@ -37,6 +43,7 @@ from scipy.optimize import least_squares
 
 N_CABLES = 8
 N_PARAMS = 8 + 8 * 3 + 8 * 3 + 1
+MOTOR_TO_LENGTH_SIGN = np.array([-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0], dtype=float)
 
 
 # Fallback nominal geometry from cdpr.py / cdpr_euler_ekf.py.
@@ -109,6 +116,31 @@ def wrap_angle(angle: float) -> float:
     return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
 
+def load_sample_metadata(path: Path) -> Dict[str, object]:
+    """Read optional JSON metadata from a comment line in the calibration txt."""
+    prefix = "# cdpr_calib_metadata "
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if not stripped.startswith("#"):
+                break
+            if stripped.startswith(prefix):
+                return json.loads(stripped[len(prefix):])
+    return {}
+
+
+def normalized_init_motor_pos_abs(metadata: Dict[str, object]) -> object:
+    """Return init_motor_pos_abs as a JSON-safe list, or None when unavailable."""
+    if "init_motor_pos_abs" not in metadata:
+        return None
+    init_motor_pos_abs = np.asarray(metadata["init_motor_pos_abs"], dtype=float).reshape(-1)
+    if init_motor_pos_abs.size != N_CABLES:
+        raise ValueError(f"init_motor_pos_abs should have {N_CABLES} values, got {init_motor_pos_abs.size}")
+    return init_motor_pos_abs.tolist()
+
+
 def load_samples(path: Path, ypr_degrees: bool, theta_degrees: bool) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Load calibration samples.
@@ -170,11 +202,12 @@ def residuals(x: np.ndarray, p: np.ndarray, ypr: np.ndarray, theta: np.ndarray, 
     Residual vector stacked sample-by-sample.
 
     For each row and each cable:
-        f = geometric_length - l0 - radius * theta
+        f = geometric_length - l0 - motor_to_length_sign * radius * theta
     """
     l0, _, _, _ = unpack_params(x)
     geom_lengths = model_lengths(p, ypr, x)
-    return (geom_lengths - l0.reshape(1, N_CABLES) - radius * theta).reshape(-1)
+    encoder_lengths = radius * theta * MOTOR_TO_LENGTH_SIGN.reshape(1, N_CABLES)
+    return (geom_lengths - l0.reshape(1, N_CABLES) - encoder_lengths).reshape(-1)
 
 
 def residual_jacobian(
@@ -260,8 +293,8 @@ def make_initial_guess(
     Build the LM initial value.
 
     If --init is not provided, use the nominal CDPR geometry and estimate l0 by
-    averaging geometric_length - radius * theta over all samples. This makes the
-    initial residual mean close to zero for every cable.
+    averaging geometric_length - motor_to_length_sign * radius * theta over all
+    samples. This makes the initial residual mean close to zero for every cable.
     """
     a = DEFAULT_A.copy()
     b = DEFAULT_B.copy()
@@ -282,7 +315,8 @@ def make_initial_guess(
     if l0 is None:
         x_tmp = pack_params(np.zeros(N_CABLES, dtype=float), a, b, yaw0)
         geom_lengths = model_lengths(p, ypr, x_tmp)
-        l0 = np.mean(geom_lengths - radius * theta, axis=0)
+        encoder_lengths = radius * theta * MOTOR_TO_LENGTH_SIGN.reshape(1, N_CABLES)
+        l0 = np.mean(geom_lengths - encoder_lengths, axis=0)
 
     return pack_params(l0, a, b, yaw0)
 
@@ -320,6 +354,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    metadata = load_sample_metadata(args.data)
+    init_motor_pos_abs = normalized_init_motor_pos_abs(metadata)
     p, ypr, theta = load_samples(args.data, args.ypr_degrees, args.theta_degrees)
 
     n_residuals = p.shape[0] * N_CABLES
@@ -353,6 +389,8 @@ def main() -> None:
         {
             "success": bool(result.success),
             "message": result.message,
+            "init_motor_pos_abs": init_motor_pos_abs,
+            "motor_to_length_sign": MOTOR_TO_LENGTH_SIGN.tolist(),
             "n_samples": int(p.shape[0]),
             "n_residuals": int(n_residuals),
             "n_parameters": int(N_PARAMS),
