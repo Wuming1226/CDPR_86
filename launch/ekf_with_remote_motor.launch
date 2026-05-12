@@ -1,0 +1,73 @@
+<launch>
+  <!-- Remote Raspberry Pi -->
+  <arg name="remote_host" default="192.168.5.104" />
+  <arg name="remote_user" default="will" />
+  <arg name="remote_port" default="22" />
+  <arg name="remote_setup_script" default="~/CDPR_86/devel/setup.bash" />
+  <arg name="remote_process_pattern" default="cdpr_86.py" />
+  <arg name="remote_start_command" default="rosrun cdpr_86_actuator cdpr_86.py" />
+  <arg name="remote_log_file" default="~/remote1_bootstrap.log" />
+  <arg name="stop_remote_on_shutdown" default="true" />
+
+  <!-- Second remote Raspberry Pi (required) -->
+  <arg name="remote2_host" default="192.168.5.105" />
+  <arg name="remote2_user" default="will" />
+  <arg name="remote2_port" default="22" />
+  <arg name="remote2_setup_script" default="~/CDPR_86/devel/setup.bash" />
+  <arg name="remote2_process_pattern" default="yesense_ahrs.launch" />
+  <arg name="remote2_start_command" default="roslaunch yesense_imu yesense_ahrs.launch" />
+  <arg name="remote2_log_file" default="~/remote2_bootstrap.log" />
+  <arg name="stop_remote2_on_shutdown" default="true" />
+
+  <!-- Readiness check -->
+  <arg name="motor_topic" default="/motor_pos" />
+  <arg name="motor_topic_wait_timeout" default="5.0" />
+  <arg name="remote2_imu_topic" default="/imu" />
+  <arg name="remote2_imu_wait_timeout" default="5.0" />
+  <arg name="post_restart_wait_s" default="1.0" />
+  <arg name="fk_xyz_only_with_imu_rpy" default="true" />
+  <arg name="mocap_rpy_from_imu" default="true" />
+  <arg name="fk_topic" default="/fk_pose" />
+
+  <!-- Local EKF startup -->
+  <arg name="local_ekf_command" default="rosrun cdpr_86_host cdpr_euler_ekf_ros_node.py _fk_xyz_only_with_imu_rpy:=$(arg fk_xyz_only_with_imu_rpy) _fk_pose_topic:=$(arg fk_topic)" />
+
+  <node pkg="cdpr_86_host"
+        type="remote_motor_ekf_bootstrap.py"
+        name="remote_motor_ekf_bootstrap"
+        output="screen">
+    <param name="remote_host" value="$(arg remote_host)" />
+    <param name="remote_user" value="$(arg remote_user)" />
+    <param name="remote_port" value="$(arg remote_port)" />
+    <param name="remote_setup_script" value="$(arg remote_setup_script)" />
+    <param name="remote_process_pattern" value="$(arg remote_process_pattern)" />
+    <param name="remote_start_command" value="$(arg remote_start_command)" />
+    <param name="remote_log_file" value="$(arg remote_log_file)" />
+    <param name="stop_remote_on_shutdown" value="$(arg stop_remote_on_shutdown)" />
+
+    <param name="remote2_host" value="$(arg remote2_host)" />
+    <param name="remote2_user" value="$(arg remote2_user)" />
+    <param name="remote2_port" value="$(arg remote2_port)" />
+    <param name="remote2_setup_script" value="$(arg remote2_setup_script)" />
+    <param name="remote2_process_pattern" value="$(arg remote2_process_pattern)" />
+    <param name="remote2_start_command" value="$(arg remote2_start_command)" />
+    <param name="remote2_log_file" value="$(arg remote2_log_file)" />
+    <param name="stop_remote2_on_shutdown" value="$(arg stop_remote2_on_shutdown)" />
+
+    <param name="motor_topic" value="$(arg motor_topic)" />
+    <param name="motor_topic_wait_timeout" value="$(arg motor_topic_wait_timeout)" />
+    <param name="remote2_imu_topic" value="$(arg remote2_imu_topic)" />
+    <param name="remote2_imu_wait_timeout" value="$(arg remote2_imu_wait_timeout)" />
+    <param name="post_restart_wait_s" value="$(arg post_restart_wait_s)" />
+    <param name="local_ekf_command" value="$(arg local_ekf_command)" />
+  </node>
+
+  <node pkg="cdpr_86_host"
+        type="compare_plot.py"
+        name="compare_plot"
+        output="screen">
+    <param name="fk_topic" value="$(arg fk_topic)" />
+    <param name="fk_xyz_only_with_imu_rpy" value="$(arg fk_xyz_only_with_imu_rpy)" />
+    <param name="mocap_rpy_from_imu" value="$(arg mocap_rpy_from_imu)" />
+  </node>
+</launch>
