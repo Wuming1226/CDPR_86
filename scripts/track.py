@@ -1,16 +1,55 @@
 #! /usr/bin/env python3
 
 import time
+import threading
+from collections import deque
 import numpy as np
 import math
 import rospy
 import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation as R
 from datetime import datetime
+from sensor_msgs.msg import Imu
 
 from cdpr import CDPR
 from jacobian import get_jacobian
 from generate_traject import smooth_p2p
+
+
+def wait_for_stable_imu_pub(
+    imu_topic: str,
+    window_sec: float = 1.0,
+    min_messages: int = 20,
+) -> None:
+    """
+    Block until IMU appears to publish steadily: at least min_messages callbacks
+    with timestamps falling within a sliding window of window_sec seconds.
+    """
+    times: deque = deque()
+    lock = threading.Lock()
+
+    def _cb(_msg: Imu) -> None:
+        now = time.time()
+        with lock:
+            times.append(now)
+            while times and now - times[0] > window_sec:
+                times.popleft()
+
+    rospy.Subscriber(imu_topic, Imu, _cb, queue_size=500)
+    rospy.loginfo(
+        "Waiting for stable IMU on %s (need >= %d msgs in %.2f s)...",
+        imu_topic,
+        min_messages,
+        window_sec,
+    )
+    rate = rospy.Rate(10.0)
+    while not rospy.is_shutdown():
+        with lock:
+            if len(times) >= min_messages:
+                rospy.loginfo("IMU on %s looks stable (%d msgs in last %.2f s).", imu_topic, len(times), window_sec)
+                return
+        rate.sleep()
+
 
 time_str = datetime.now().strftime("%m%d_%H%M")
 # folder = '../data/beta/'
@@ -25,6 +64,8 @@ euler_save_path = folder + 'euler_' + time_str + '.txt'
 if __name__ == "__main__":
 
     cdpr = CDPR(imu_active=True)
+    if cdpr.imu_active:
+        wait_for_stable_imu_pub(cdpr.imu_topic)
 
     T = 0.05     # control period
     rate = rospy.Rate(1/T)
@@ -44,12 +85,15 @@ if __name__ == "__main__":
 
     # traject = np.loadtxt("path_mix.txt")
 
-    end_to_center_offset_x = -0.933 - (-0.950)
-    end_to_center_offset_y = -0.728 - (-0.660)
-    start_point = np.array(cdpr.get_moving_platform_pose_from_mocap()[0:3])
-    start_point = np.concatenate([start_point, [0, 0, 0]])
+    # end_to_center_offset_x = -0.933 - (-0.950)
+    # end_to_center_offset_y = -0.728 - (-0.660)
+    x0, y0, z0, quat0 = cdpr.get_moving_platform_pose_from_mocap()
+    start_pos = np.array([x0, y0, z0])
+    start_euler = R.from_quat(quat0).as_euler('ZYX', degrees=False)
+    start_point = np.concatenate([start_pos, start_euler])
     print(start_point)
-    way_point1 = start_point + np.array([0.0, -0.0, 0.0, 0.0, 0.0, 0.0])
+    way_point1 = start_point + np.array([0., 0., 0., 0.0, 0.0, 0.0])
+    way_point1[3:6] = np.array([0, 0, -0]) / 180 * np.pi
     # way_point1[2] = 0.65
     # way_point1 = np.array([-1.1774, -0.7348, 0.72, 0, 0, 0])
     # way_point1 = np.array([-1.1574, -0.7348, 0.72, 0, 0, 0])
@@ -60,7 +104,7 @@ if __name__ == "__main__":
     # way_point4 = way_point3 + np.array([0.1, 0, 0, 0.0, 0.0, 0.0])
     traject_len = np.linalg.norm(way_point1 - start_point)
     traject = smooth_p2p([start_point, way_point1, way_point1],
-                         [2.5, 2], np.inf, 0.05)
+                         [3, 2], np.inf, 0.05)
     # traject = smooth_p2p([start_point, start_point],
     #                      [10], np.inf, 0.05)
     # traject = smooth_p2p([start_point, way_point1], [10], np.inf, 0.05)
@@ -139,7 +183,7 @@ if __name__ == "__main__":
         # --- 滑模 ---
         eps = np.diag([0.01, 0.01, 0.01, 0.01, 0.01, 0.01])
         eps = np.diag([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-        k = np.diag([1.1, 1.1, 1.1, 20.0, 20.0, 20.0])
+        k = np.diag([1.1, 1.1, 1.1, 2.0, 2.0, 2.0])
 
         velo_task = (
                 velo_ref

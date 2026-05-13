@@ -426,7 +426,7 @@ def make_demo_geometry() -> CDPRGeometry:
     try:
         from cdpr import CDPR
 
-        cdpr = CDPR()
+        cdpr = CDPR(imu_active=False)
         winches, att = cdpr.get_cable_attachment_points()
     except Exception:
         # Keep a fallback for non-ROS standalone runs.
@@ -444,14 +444,14 @@ def make_demo_geometry() -> CDPRGeometry:
         )
         att = np.array(
             [
-                [0.0184, -0.0125, 0.0110],
-                [-0.0140, 0.0169, -0.0110],
-                [0.0140, 0.0169, 0.0110],
-                [-0.0184, -0.0125, -0.0110],
-                [-0.0184, 0.0125, 0.0110],
-                [0.0140, -0.0169, -0.0110],
-                [-0.0140, -0.0169, 0.0110],
-                [0.0184, 0.0125, -0.0110],
+                [0.184, -0.125, 0.110],
+                [-0.140, 0.169, -0.110],
+                [0.140, 0.169, 0.110],
+                [-0.184, -0.125, -0.110],
+                [-0.184, 0.125, 0.110],
+                [0.140, -0.169, -0.110],
+                [-0.140, -0.169, 0.110],
+                [0.184, 0.125, -0.110],
             ]
         )
     return CDPRGeometry(winches_a=winches, attachments_b=att)
