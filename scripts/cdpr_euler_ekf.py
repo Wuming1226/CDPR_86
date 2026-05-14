@@ -1,6 +1,8 @@
+import json
 import math
 from dataclasses import dataclass
-from typing import Tuple
+from pathlib import Path
+from typing import Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -422,39 +424,74 @@ class EulerEKFCDPR:
         self.p = (i - k @ h) @ self.p @ (i - k @ h).T + k @ self.r @ k.T
 
 
-def make_demo_geometry() -> CDPRGeometry:
-    try:
-        from cdpr import CDPR
+def cdpr_geometry_from_calibration_file(
+    calibration_file: str,
+    *,
+    base_dir: Optional[Path] = None,
+) -> CDPRGeometry:
+    """Build ``CDPRGeometry`` from kinematic calibration JSON (``a``, ``b`` keys).
 
-        cdpr = CDPR(imu_active=False)
-        winches, att = cdpr.get_cable_attachment_points()
-    except Exception:
-        # Keep a fallback for non-ROS standalone runs.
-        winches = np.array(
-            [
-                [-0.260, -0.243, 2.300],
-                [-0.361, -0.125, 2.300],
-                [-2.049, -0.089, 2.300],
-                [-2.169, -0.212, 2.300],
-                [-2.193, -1.225, 2.290],
-                [-2.084, -1.357, 2.300],
-                [-0.415, -1.384, 2.300],
-                [-0.290, -1.252, 2.300],
-            ]
-        )
-        att = np.array(
-            [
-                [0.184, -0.125, 0.110],
-                [-0.140, 0.169, -0.110],
-                [0.140, 0.169, 0.110],
-                [-0.184, -0.125, -0.110],
-                [-0.184, 0.125, 0.110],
-                [0.140, -0.169, -0.110],
-                [-0.140, -0.169, 0.110],
-                [0.184, 0.125, -0.110],
-            ]
-        )
-    return CDPRGeometry(winches_a=winches, attachments_b=att)
+    Does not construct ``CDPR`` (no ROS publishers). Relative paths resolve like
+    ``cdpr.CDPR.load_kinematic_calibration``: non-absolute paths are under
+    ``base_dir`` (default: directory of this module).
+    """
+    path = Path(calibration_file).expanduser()
+    if not path.is_absolute():
+        root = base_dir if base_dir is not None else Path(__file__).resolve().parent
+        path = root / path
+    with path.open("r", encoding="utf-8") as f:
+        calib = json.load(f)
+    a = np.asarray(calib["a"], dtype=float).reshape(8, 3)
+    b = np.asarray(calib["b"], dtype=float).reshape(8, 3)
+    return CDPRGeometry(winches_a=a.copy(), attachments_b=b.copy())
+
+
+_NOMINAL_WINCHES_A = np.array(
+    [
+        [-0.260, -0.243, 2.300],
+        [-0.361, -0.125, 2.300],
+        [-2.049, -0.089, 2.300],
+        [-2.169, -0.212, 2.300],
+        [-2.193, -1.225, 2.290],
+        [-2.084, -1.357, 2.300],
+        [-0.415, -1.384, 2.300],
+        [-0.290, -1.252, 2.300],
+    ]
+)
+_NOMINAL_ATTACHMENTS_B = np.array(
+    [
+        [0.184, -0.125, 0.110],
+        [-0.140, 0.169, -0.110],
+        [0.140, 0.169, 0.110],
+        [-0.184, -0.125, -0.110],
+        [-0.184, 0.125, 0.110],
+        [0.140, -0.169, -0.110],
+        [-0.140, -0.169, 0.110],
+        [0.184, 0.125, -0.110],
+    ]
+)
+
+
+def make_demo_geometry(use_ros_cdpr: bool = False) -> CDPRGeometry:
+    """Nominal CDPR geometry for FK/EKF demos and plotting.
+
+    By default this does **not** construct ``CDPR()`` (which registers ROS
+    publishers). Pass ``use_ros_cdpr=True`` only when you intentionally want
+    attachment matrices from a live ``CDPR`` instance.
+    """
+    if use_ros_cdpr:
+        try:
+            from cdpr import CDPR
+
+            cdpr = CDPR(imu_active=False)
+            winches, att = cdpr.get_cable_attachment_points()
+            return CDPRGeometry(winches_a=winches, attachments_b=att)
+        except Exception:
+            pass
+    return CDPRGeometry(
+        winches_a=_NOMINAL_WINCHES_A.copy(),
+        attachments_b=_NOMINAL_ATTACHMENTS_B.copy(),
+    )
 
 
 def run_demo():

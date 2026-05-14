@@ -20,7 +20,7 @@
   <arg name="stop_remote2_on_shutdown" default="true" />
 
   <!-- Readiness check -->
-  <arg name="motor_topic" default="/motor_pos_rel" />
+  <arg name="motor_topic" default="/motor_pos_abs" />
   <arg name="motor_topic_wait_timeout" default="5.0" />
   <arg name="remote2_imu_topic" default="/imu" />
   <arg name="remote2_imu_wait_timeout" default="5.0" />
@@ -28,9 +28,11 @@
   <arg name="fk_xyz_only_with_imu_rpy" default="true" />
   <arg name="mocap_rpy_from_imu" default="true" />
   <arg name="fk_topic" default="/fk_pose" />
+  <arg name="cdpr_is_calibrated" default="true" />
+  <arg name="cdpr_calibration_file" default="synth_calib_33.json" />
 
   <!-- Local EKF startup -->
-  <arg name="local_ekf_command" default="rosrun cdpr_86_host cdpr_euler_ekf_ros_node.py _fk_xyz_only_with_imu_rpy:=$(arg fk_xyz_only_with_imu_rpy) _fk_pose_topic:=$(arg fk_topic)" />
+  <arg name="local_ekf_command" default="rosrun cdpr_86_host cdpr_euler_ekf_ros_node.py _fk_xyz_only_with_imu_rpy:=$(arg fk_xyz_only_with_imu_rpy) _fk_pose_topic:=$(arg fk_topic) _is_calibrated:=$(arg cdpr_is_calibrated) _calibration_file:=$(arg cdpr_calibration_file)" />
 
   <node pkg="cdpr_86_host"
         type="remote_motor_ekf_bootstrap.py"
@@ -69,5 +71,7 @@
     <param name="fk_topic" value="$(arg fk_topic)" />
     <param name="fk_xyz_only_with_imu_rpy" value="$(arg fk_xyz_only_with_imu_rpy)" />
     <param name="mocap_rpy_from_imu" value="$(arg mocap_rpy_from_imu)" />
+    <param name="is_calibrated" value="$(arg cdpr_is_calibrated)" />
+    <param name="calibration_file" value="$(arg cdpr_calibration_file)" />
   </node>
 </launch>

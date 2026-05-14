@@ -4,6 +4,8 @@ import rospy
 import time
 import numpy as np
 import copy
+import json
+from pathlib import Path
 from scipy.spatial.transform import Rotation as R
 
 from cdpr_86_host.msg import CableLengthsStamped
@@ -16,7 +18,16 @@ from jacobian import get_jacobian
 
 class CDPR:
 
-    def __init__(self, imu_active: bool = False, imu_topic: str = "/imu"):
+    def __init__(
+        self,
+        imu_active: bool = False,
+        imu_topic: str = "/imu",
+        is_calibrated: bool = False,
+        calibration_file: str = None,
+    ):
+        self.is_calibrated = bool(is_calibrated)
+        self.calibration_file = calibration_file
+        self._kinematic_calibration = None
 
         # 坐标系marker点在基座坐标下的位置偏移
         self.x_offset = -1.020
@@ -54,6 +65,11 @@ class CDPR:
         self._anchorB8 = np.array([0.184, 0.125, -0.110])
         self.b_matrix = np.vstack([self._anchorB1, self._anchorB2, self._anchorB3, self._anchorB4,
                                    self._anchorB5, self._anchorB6, self._anchorB7, self._anchorB8])
+
+        if self.is_calibrated:
+            if calibration_file is None:
+                calibration_file = Path(__file__).resolve().with_name("synth_calib.json")
+            self._kinematic_calibration = self.load_kinematic_calibration(calibration_file)
 
         # ros settings
         if rospy.get_name() == '/unnamed':
@@ -97,15 +113,49 @@ class CDPR:
                 )
 
         # initial cable lengths and motor positions
-        self.init_cable_lens = np.array([0., 0., 0., 0., 0., 0., 0., 0.])  # 初始化的类型必须是浮点！！！
-        self.init_cable_length()
         self.motor_pos = np.array([0, 0, 0, 0, 0, 0, 0, 0], dtype=float)
         self.init_motor_pos = np.array([0, 0, 0, 0, 0, 0, 0, 0], dtype=float)
+        self.init_cable_lens = np.array([0., 0., 0., 0., 0., 0., 0., 0.])  # 初始化的类型必须是浮点！！！
+
+        if self.is_calibrated:
+            self.init_cable_lens = np.asarray(self._kinematic_calibration["l0"], dtype=float).reshape(8)
+            self.init_motor_pos = np.asarray(
+                self._kinematic_calibration["init_motor_pos_abs"],
+                dtype=float,
+            ).reshape(8)
+            rospy.loginfo("Loaded calibrated l0 and init_motor_pos_abs from %s.", self.calibration_file)
+        else:
+            self.init_cable_length()
+
         self._motor_pos_received = False
-        rospy.Subscriber('motor_pos_rel', Float32MultiArray, self._motor_pos_callback, queue_size=1)
-        while not rospy.is_shutdown() and not self._motor_pos_received:
-            rospy.sleep(0.01)
-        self.init_motor_pos = self.motor_pos.copy()
+        rospy.Subscriber('motor_pos_abs', Float32MultiArray, self._motor_pos_callback, queue_size=1)
+        if not self.is_calibrated:
+            while not rospy.is_shutdown() and not self._motor_pos_received:
+                rospy.sleep(0.01)
+            self.init_motor_pos = self.motor_pos.copy()
+
+    def load_kinematic_calibration(self, calibration_file):
+        calibration_path = Path(calibration_file).expanduser()
+        if not calibration_path.is_absolute():
+            calibration_path = Path(__file__).resolve().parent / calibration_path
+
+        with calibration_path.open("r", encoding="utf-8") as f:
+            calib = json.load(f)
+
+        a = np.asarray(calib["a"], dtype=float).reshape(8, 3)
+        b = np.asarray(calib["b"], dtype=float).reshape(8, 3)
+
+        self._anchorA1, self._anchorA2, self._anchorA3, self._anchorA4 = a[0], a[1], a[2], a[3]
+        self._anchorA5, self._anchorA6, self._anchorA7, self._anchorA8 = a[4], a[5], a[6], a[7]
+        self.a_matrix = a.copy()
+
+        self._anchorB1, self._anchorB2, self._anchorB3, self._anchorB4 = b[0], b[1], b[2], b[3]
+        self._anchorB5, self._anchorB6, self._anchorB7, self._anchorB8 = b[4], b[5], b[6], b[7]
+        self.b_matrix = b.copy()
+
+        self.calibration_file = str(calibration_path)
+        rospy.loginfo("Loaded CDPR kinematic calibration from %s", calibration_path)
+        return calib
         
     def init_cable_length(self):
         # calculate origin cable lengths
@@ -193,10 +243,11 @@ class CDPR:
         r = 0.025
         cable_lengths = self.init_cable_lens.copy()
         for i in range(min(len(cable_lengths), len(motor_pos))):
+            motor_delta = (motor_pos[i] - self.init_motor_pos[i]) / 10000.0 * 2.0 * np.pi
             if not i % 2:
-                cable_lengths[i] = self.init_cable_lens[i] - motor_pos[i] * r
+                cable_lengths[i] = self.init_cable_lens[i] - motor_delta * r
             else:
-                cable_lengths[i] = self.init_cable_lens[i] + motor_pos[i] * r
+                cable_lengths[i] = self.init_cable_lens[i] + motor_delta * r
         return cable_lengths
 
     def set_motor_velo(self, motor_velo):

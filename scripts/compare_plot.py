@@ -2,12 +2,13 @@
 
 import threading
 from collections import deque
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import rospy
 from cdpr_86_host.msg import CableLengthsStamped
-from cdpr_euler_ekf import make_demo_geometry
+from cdpr_euler_ekf import cdpr_geometry_from_calibration_file, make_demo_geometry
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Imu
 from scipy.spatial.transform import Rotation as R
@@ -57,7 +58,21 @@ class PoseImuNavPlotNode:
         # True: IMU linear_acceleration is specific force f=a-g (default, common raw IMU output).
         # False: IMU linear_acceleration is already linear acceleration a (gravity removed).
         self.imu_acc_is_specific_force = _as_bool(rospy.get_param("~imu_acc_is_specific_force", True))
-        self.geom = make_demo_geometry()
+        # Match cdpr_euler_ekf_ros_node: same ~is_calibrated / ~calibration_file (no CDPR() here → no extra pubs).
+        self.is_calibrated = _as_bool(rospy.get_param("~is_calibrated", True))
+        self.calibration_file = rospy.get_param("~calibration_file", "synth_calib_33.json")
+        if self.is_calibrated:
+            self.geom = cdpr_geometry_from_calibration_file(
+                self.calibration_file,
+                base_dir=Path(__file__).resolve().parent,
+            )
+        else:
+            self.geom = make_demo_geometry(use_ros_cdpr=False)
+        rospy.loginfo(
+            "compare_plot geometry: is_calibrated=%s file=%s",
+            str(self.is_calibrated),
+            str(self.calibration_file) if self.is_calibrated else "(nominal)",
+        )
 
         self.lock = threading.Lock()
         self.pose_buf = RollingBuffer(self.window_sec)

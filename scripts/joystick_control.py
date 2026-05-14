@@ -13,7 +13,7 @@ from jacobian import get_jacobian
 
 class JoystickClosedLoopController:
     def __init__(self):
-        self.cdpr = CDPR()
+        self.cdpr = CDPR(imu_active=False, is_calibrated=True, calibration_file='synth_calib_33.json')
 
         self.control_period = rospy.get_param("~control_period", 1.0 / 15)
         self.coil_radius = rospy.get_param("~coil_radius", 0.025)
@@ -24,7 +24,7 @@ class JoystickClosedLoopController:
         self.angular_acc_limit = rospy.get_param("~angular_acc_limit", 2.0)
 
         # Position/orientation feedback gains in task space.
-        self.k = np.diag(rospy.get_param("~k_diag", [1.1, 1.1, 1.1, 20.0, 20.0, 20.0]))
+        self.k = np.diag(rospy.get_param("~k_diag", [1.1, 1.1, 1.1, 2.0, 2.0, 2.0]))
 
         self.cmd_vel = np.zeros(6)
         self.last_cmd_time = None

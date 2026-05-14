@@ -12,11 +12,11 @@ from scipy.spatial.transform import Rotation as R
 
 from cdpr import CDPR
 from cdpr_euler_ekf import (
+    CDPRGeometry,
     EulerEKFCDPR,
     forward_kinematics_lm,
     forward_kinematics_lm_with_prior,
     forward_kinematics_lm_xyz_with_fixed_attitude,
-    make_demo_geometry,
 )
 
 
@@ -43,11 +43,18 @@ class CDPREulerEkfNode:
         self.fk_xyz_only_with_imu_rpy = _as_bool(rospy.get_param("~fk_xyz_only_with_imu_rpy", False))
         self.sync_queue_size = int(rospy.get_param("~sync_queue_size", 100))
         self.sync_slop = float(rospy.get_param("~sync_slop", 1.0 / 15))
+        self.is_calibrated = _as_bool(rospy.get_param("~is_calibrated", True))
+        self.calibration_file = rospy.get_param("~calibration_file", "synth_calib_33.json")
 
         g_a = np.array([0.0, 0.0, -9.81], dtype=float)
-        self.geom = make_demo_geometry()
+        self.cdpr = CDPR(
+            imu_active=True,
+            is_calibrated=self.is_calibrated,
+            calibration_file=(self.calibration_file if self.is_calibrated else None),
+        )
+        wa, wb = self.cdpr.get_cable_attachment_points()
+        self.geom = CDPRGeometry(winches_a=wa, attachments_b=wb)
         self.ekf = EulerEKFCDPR(dt=self.default_dt, g_a=g_a)
-        self.cdpr = CDPR(imu_active=True)
 
         x0 = np.zeros(15, dtype=float)
         x, y, z, quat = self.cdpr.get_moving_platform_pose_from_mocap()
@@ -76,6 +83,11 @@ class CDPREulerEkfNode:
         self.sync.registerCallback(self.synced_callback)
 
         rospy.loginfo("CDPR Euler-EKF node started.")
+        rospy.loginfo(
+            "CDPR kinematics: is_calibrated=%s calibration_file=%s",
+            str(self.is_calibrated),
+            str(self.calibration_file) if self.is_calibrated else "(n/a)",
+        )
         rospy.loginfo("Subscribe IMU: %s, cable lengths: %s (approx sync)", self.imu_topic, self.cable_topic)
         rospy.loginfo("Approx sync config: queue_size=%d, slop=%.4f s", self.sync_queue_size, self.sync_slop)
         rospy.loginfo("Publish pose: %s", self.pose_topic)

@@ -8,6 +8,8 @@ Data file format, one sample per line:
 Optional metadata line, usually written by record_cdpr_calib_data.py:
     # cdpr_calib_metadata {"init_motor_pos_abs":[...]}
 
+Use --rows to calibrate on a subset of loaded numeric rows (0-based slice list; see --rows help).
+
 The script estimates 57 parameters:
     l0      : 8 cable original lengths
     a       : 8 frame anchor points in world/base coordinates, shape (8, 3)
@@ -29,13 +31,15 @@ Euler convention:
 Example:
     python3 calibrate_cdpr_kinematics.py samples.txt --radius 0.020 --output calib.json
     python3 calibrate_cdpr_kinematics.py samples.txt --radius 0.020 --ypr-degrees
+    python3 calibrate_cdpr_kinematics.py samples.txt --radius 0.025 --rows "1:3,10:20,-5:"
+    python3 calibrate_cdpr_kinematics.py samples.txt --radius 0.025 --rows "[1:3，5：13，-13：-1]"
 """
 
 import argparse
 import json
 import math
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 from scipy.optimize import least_squares
@@ -114,6 +118,63 @@ def dypr_zyx_dyaw(yaw: float, pitch: float, roll: float) -> np.ndarray:
 def wrap_angle(angle: float) -> float:
     """Wrap an angle to [-pi, pi)."""
     return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def parse_row_indices(spec: str, n_rows: int) -> np.ndarray:
+    """
+    Build a sorted list of unique row indices from a comma-separated slice spec.
+
+    Indices follow Python/NumPy rules on the loaded numeric sample matrix (0-based,
+    half-open [start:end), negative indices count from the end).
+
+    The string may use ASCII or full-width punctuation; optional surrounding [...]
+    and spaces are stripped. Examples (n_rows large enough):
+        "1:3"       -> rows 1, 2
+        "5:13"      -> rows 5 .. 12
+        "-13:-1"    -> rows n-13 .. n-2
+        "[1:3,10:20,-5:]" -> same with brackets
+        "10：20"    -> rows 10..19 (full-width colon)
+    """
+    spec = spec.strip()
+    if spec.startswith("[") and spec.endswith("]"):
+        spec = spec[1:-1].strip()
+    # Normalize full-width punctuation (common when copying from docs)
+    spec = spec.replace("，", ",").replace("：", ":").replace(" ", "")
+    if not spec:
+        return np.arange(n_rows, dtype=int)
+
+    ar = np.arange(n_rows, dtype=int)
+    chunks: List[np.ndarray] = []
+
+    for raw in spec.split(","):
+        part = raw.strip()
+        if not part:
+            continue
+        if part.count(":") > 1:
+            raise ValueError(f"Invalid row segment (at most one ':'): {raw!r}")
+        if ":" in part:
+            left, right = part.split(":", 1)
+            start = int(left) if left != "" else None
+            end = int(right) if right != "" else None
+            idx = ar[slice(start, end)]
+        else:
+            k = int(part)
+            if k < 0:
+                k += n_rows
+            if k < 0 or k >= n_rows:
+                raise ValueError(f"Row index {part!r} out of range for n_rows={n_rows}")
+            idx = np.array([k], dtype=int)
+        if idx.size == 0:
+            raise ValueError(f"Row segment {raw!r} selects no rows (n_rows={n_rows}).")
+        chunks.append(idx)
+
+    if not chunks:
+        return np.arange(n_rows, dtype=int)
+
+    out = np.unique(np.concatenate(chunks))
+    if out.size == 0:
+        raise ValueError("Row selection is empty.")
+    return out
 
 
 def load_sample_metadata(path: Path) -> Dict[str, object]:
@@ -349,6 +410,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ypr-degrees", action="store_true", help="Treat input yaw/pitch/roll as degrees.")
     parser.add_argument("--theta-degrees", action="store_true", help="Treat input encoder theta as degrees.")
     parser.add_argument("--max-nfev", type=int, default=2000, help="Maximum LM function evaluations.")
+    parser.add_argument(
+        "--rows",
+        type=str,
+        default="",
+        help=(
+            "Comma-separated slice ranges over loaded sample rows (0-based, half-open [start:end), "
+            "Python/NumPy rules; negative indices from end). Optional [...] wrapper; ASCII or full-width ，： "
+            "Example: '1:3,10:20,-5:' or '[1:3，10：20，-5：]' Default: all rows."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -357,6 +428,22 @@ def main() -> None:
     metadata = load_sample_metadata(args.data)
     init_motor_pos_abs = normalized_init_motor_pos_abs(metadata)
     p, ypr, theta = load_samples(args.data, args.ypr_degrees, args.theta_degrees)
+    n_rows_loaded = int(p.shape[0])
+
+    row_spec = (args.rows or "").strip()
+    if row_spec:
+        row_idx = parse_row_indices(row_spec, n_rows_loaded)
+        p = p[row_idx]
+        ypr = ypr[row_idx]
+        theta = theta[row_idx]
+        if row_idx.size <= 40:
+            idx_str = str(row_idx.tolist())
+        else:
+            idx_str = f"{row_idx[:20].tolist()} ... {row_idx[-10:].tolist()} ({row_idx.size} total)"
+        print(f"Row selection {row_spec!r}: using {p.shape[0]} / {n_rows_loaded} samples (indices: {idx_str})")
+    else:
+        row_idx = np.arange(n_rows_loaded, dtype=int)
+        print(f"Using all {n_rows_loaded} samples.")
 
     n_residuals = p.shape[0] * N_CABLES
     if n_residuals < N_PARAMS:
@@ -391,6 +478,9 @@ def main() -> None:
             "message": result.message,
             "init_motor_pos_abs": init_motor_pos_abs,
             "motor_to_length_sign": MOTOR_TO_LENGTH_SIGN.tolist(),
+            "n_rows_loaded": n_rows_loaded,
+            "row_selection": row_spec if row_spec else "all",
+            "row_indices": row_idx.tolist(),
             "n_samples": int(p.shape[0]),
             "n_residuals": int(n_residuals),
             "n_parameters": int(N_PARAMS),

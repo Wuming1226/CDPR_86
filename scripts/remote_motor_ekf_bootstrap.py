@@ -20,7 +20,7 @@ class RemoteMotorEkfBootstrap:
         self.remote_start_command = rospy.get_param("~remote_start_command", "rosrun cdpr_86_actuator cdpr_86.py")
         self.remote_setup_script = rospy.get_param("~remote_setup_script", "~/CDPR_86/devel/setup.bash")
         self.remote_log_file = rospy.get_param("~remote_log_file", "~/motor_node_bootstrap.log")
-        self.motor_topic = rospy.get_param("~motor_topic", "/motor_pos_rel")
+        self.motor_topic = rospy.get_param("~motor_topic", "/motor_pos_abs")
         self.motor_topic_wait_timeout = float(rospy.get_param("~motor_topic_wait_timeout", 20.0))
         self.post_restart_wait_s = float(rospy.get_param("~post_restart_wait_s", 1.0))
 
