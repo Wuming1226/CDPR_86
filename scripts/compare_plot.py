@@ -13,6 +13,8 @@ from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Imu
 from scipy.spatial.transform import Rotation as R
 
+from imu_extrinsic import ImuExtrinsic, load_extrinsic_for_node
+
 
 def _as_bool(v) -> bool:
     if isinstance(v, bool):
@@ -53,14 +55,23 @@ class PoseImuNavPlotNode:
         self.imu_topic = rospy.get_param("~imu_topic", "/imu")
         self.cable_topic = rospy.get_param("~cable_topic", "/cable_lengths_measure")
         self.show_cable_plot = _as_bool(rospy.get_param("~show_cable_plot", False))
-        self.mocap_rpy_from_imu = _as_bool(rospy.get_param("~mocap_rpy_from_imu", False))
+        self.rpy_from_imu = _as_bool(rospy.get_param("~rpy_from_imu", False))
+        self.apply_imu_extrinsic = _as_bool(rospy.get_param("~apply_imu_extrinsic", True))
+        self.imu_extrinsic_file = rospy.get_param("~imu_extrinsic_file", "cdpr_imu_extrinsic.json")
+        self._imu_extrinsic: ImuExtrinsic = None
+        if self.rpy_from_imu and self.apply_imu_extrinsic:
+            self._imu_extrinsic = load_extrinsic_for_node(
+                self.imu_extrinsic_file,
+                enabled=True,
+                node_name="compare_plot",
+            )
         self.gravity = np.array([0.0, 0.0, -9.81], dtype=float)
         # True: IMU linear_acceleration is specific force f=a-g (default, common raw IMU output).
         # False: IMU linear_acceleration is already linear acceleration a (gravity removed).
         self.imu_acc_is_specific_force = _as_bool(rospy.get_param("~imu_acc_is_specific_force", True))
         # Match cdpr_euler_ekf_ros_node: same ~is_calibrated / ~calibration_file (no CDPR() here → no extra pubs).
         self.is_calibrated = _as_bool(rospy.get_param("~is_calibrated", True))
-        self.calibration_file = rospy.get_param("~calibration_file", "synth_calib_33.json")
+        self.calibration_file = rospy.get_param("~calibration_file", "cdpr_kinematic_calib.json")
         if self.is_calibrated:
             self.geom = cdpr_geometry_from_calibration_file(
                 self.calibration_file,
@@ -94,7 +105,7 @@ class PoseImuNavPlotNode:
         self.nav_rpy = np.zeros(3, dtype=float)  # roll pitch yaw
         self.last_imu_t = None
         self.nav_initialized = False
-        self.latest_imu_quat = None  # [x, y, z, w], used for mocap rpy override
+        self.latest_imu_quat = None  # [x, y, z, w], used for optional rpy override
 
         rospy.Subscriber(self.pose_topic, PoseStamped, self.pose_callback, queue_size=100)
         rospy.Subscriber(self.ekf_topic, PoseStamped, self.ekf_callback, queue_size=100)
@@ -156,7 +167,26 @@ class PoseImuNavPlotNode:
         rospy.loginfo("fk_topic=%s", self.fk_topic)
         rospy.loginfo("imu_acc_is_specific_force=%s", str(self.imu_acc_is_specific_force))
         rospy.loginfo("show_cable_plot=%s", str(self.show_cable_plot))
-        rospy.loginfo("mocap_rpy_from_imu=%s", str(self.mocap_rpy_from_imu))
+        rospy.loginfo("rpy_from_imu=%s", str(self.rpy_from_imu))
+        rospy.loginfo(
+            "IMU extrinsic: apply=%s file=%s loaded=%s",
+            str(self.apply_imu_extrinsic),
+            self.imu_extrinsic_file,
+            str(self._imu_extrinsic is not None),
+        )
+
+    def _correct_imu_quat(self, quat_xyzw: np.ndarray) -> np.ndarray:
+        q = np.asarray(quat_xyzw, dtype=float).reshape(4)
+        if self._imu_extrinsic is None:
+            return q
+        out = self._imu_extrinsic.apply_quat(q)
+        return out if out is not None else q
+
+    def _correct_imu_vector(self, vec: np.ndarray) -> np.ndarray:
+        v = np.asarray(vec, dtype=float).reshape(3)
+        if self._imu_extrinsic is None:
+            return v
+        return self._imu_extrinsic.apply_vector(v)
 
     @staticmethod
     def pose_to_xyzrpy(msg: PoseStamped) -> np.ndarray:
@@ -168,8 +198,8 @@ class PoseImuNavPlotNode:
     def pose_callback(self, msg: PoseStamped) -> None:
         t = msg.header.stamp.to_sec() if msg.header.stamp != rospy.Time() else rospy.Time.now().to_sec()
         vec = self.pose_to_xyzrpy(msg)
-        # Optional: keep mocap xyz, but override mocap rpy with IMU attitude.
-        if self.mocap_rpy_from_imu and self.latest_imu_quat is not None:
+        # Optional: keep mocap xyz, but override plotted rpy with IMU attitude.
+        if self.rpy_from_imu and self.latest_imu_quat is not None:
             yaw, pitch, roll = R.from_quat(self.latest_imu_quat).as_euler("ZYX", degrees=False)
             vec[3:] = np.array([roll, pitch, yaw], dtype=float)
         with self.lock:
@@ -189,9 +219,11 @@ class PoseImuNavPlotNode:
 
     def imu_callback(self, msg: Imu) -> None:
         t = msg.header.stamp.to_sec() if msg.header.stamp != rospy.Time() else rospy.Time.now().to_sec()
-        self.latest_imu_quat = np.array(
-            [msg.orientation.x, msg.orientation.y, msg.orientation.z, msg.orientation.w],
-            dtype=float,
+        self.latest_imu_quat = self._correct_imu_quat(
+            np.array(
+                [msg.orientation.x, msg.orientation.y, msg.orientation.z, msg.orientation.w],
+                dtype=float,
+            )
         )
         if self.last_imu_t is None:
             self.last_imu_t = t
@@ -204,10 +236,14 @@ class PoseImuNavPlotNode:
             return
         self.last_imu_t = t
 
-        gyro_b = np.array([msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z], dtype=float)
-        imu_acc_b = np.array(
-            [msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z],
-            dtype=float,
+        gyro_b = self._correct_imu_vector(
+            np.array([msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z], dtype=float)
+        )
+        imu_acc_b = self._correct_imu_vector(
+            np.array(
+                [msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z],
+                dtype=float,
+            )
         )
 
         # Integrate attitude with body rates using Euler angles (small-dt approximation).

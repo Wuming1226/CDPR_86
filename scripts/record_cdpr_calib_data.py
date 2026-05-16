@@ -10,8 +10,12 @@ window of pose/IMU/encoder data and appends one line to a txt file:
 
 Default topics:
     /vrpn_client_node/cdpr/pose    geometry_msgs/PoseStamped
-    /imu                          sensor_msgs/Imu
+    /imu                          sensor_msgs/Imu (only if --imu-active)
     /motor_pos_abs                std_msgs/Float32MultiArray
+
+Use --imu-active (default) to average yaw/pitch/roll from the IMU quaternion.
+Use --no-imu-active to average yaw/pitch/roll from the mocap pose quaternion
+(same intrinsic ZYX convention as the IMU path).
 
 Stop with Ctrl-C.
 """
@@ -32,9 +36,19 @@ from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Float32MultiArray
 
+from imu_extrinsic import ImuExtrinsic, load_extrinsic_for_node
+
 
 N_CABLES = 8
 COUNTS_PER_REV = 10000.0
+
+
+def _as_bool(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)
 
 
 def circular_mean(angles: np.ndarray) -> float:
@@ -77,21 +91,35 @@ class CDPRCalibrationRecorder:
         motor_abs_topic: str,
         init_motor_window_sec: float,
         angle_degrees: bool,
+        imu_active: bool,
+        imu_extrinsic_file: str = None,
+        apply_imu_extrinsic: bool = True,
     ):
         self.output_path = output_path
         self.window_sec = float(window_sec)
         self.init_motor_window_sec = float(init_motor_window_sec)
         self.keep_sec = max(2.0 * self.window_sec, self.window_sec + 1.0, self.init_motor_window_sec + 1.0)
         self.angle_degrees = bool(angle_degrees)
+        self.imu_active = bool(imu_active)
+        self._imu_extrinsic: ImuExtrinsic = None
+        if self.imu_active and apply_imu_extrinsic:
+            path = imu_extrinsic_file or rospy.get_param("~imu_extrinsic_file", "cdpr_imu_extrinsic.json")
+            self._imu_extrinsic = load_extrinsic_for_node(
+                path,
+                enabled=True,
+                node_name="record_cdpr_calib_data",
+            )
 
         self.lock = threading.Lock()
+        # Each row: [x, y, z, yaw, pitch, roll] from mocap (ypr same ZYX convention as IMU buffer).
         self.pose_buf: Deque[Tuple[float, np.ndarray]] = deque()
         self.imu_buf: Deque[Tuple[float, np.ndarray]] = deque()
         self.motor_abs_buf: Deque[Tuple[float, np.ndarray]] = deque()
         self.init_motor_pos_abs: np.ndarray = np.zeros(N_CABLES, dtype=float)
 
         rospy.Subscriber(pose_topic, PoseStamped, self.pose_callback, queue_size=200)
-        rospy.Subscriber(imu_topic, Imu, self.imu_callback, queue_size=200)
+        if self.imu_active:
+            rospy.Subscriber(imu_topic, Imu, self.imu_callback, queue_size=200)
         rospy.Subscriber(motor_abs_topic, Float32MultiArray, self.motor_abs_callback, queue_size=200)
 
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -102,8 +130,23 @@ class CDPRCalibrationRecorder:
             [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z],
             dtype=float,
         )
+        quat = np.array(
+            [
+                msg.pose.orientation.x,
+                msg.pose.orientation.y,
+                msg.pose.orientation.z,
+                msg.pose.orientation.w,
+            ],
+            dtype=float,
+        )
+        if np.all(np.isfinite(quat)) and np.linalg.norm(quat) >= 1e-12:
+            ypr_m = R.from_quat(quat).as_euler("ZYX", degrees=False)
+        else:
+            ypr_m = np.zeros(3, dtype=float)
+
+        row = np.hstack([pos, ypr_m])
         with self.lock:
-            self.pose_buf.append((stamp, pos))
+            self.pose_buf.append((stamp, row))
             trim_buffer(self.pose_buf, stamp, self.keep_sec)
 
     def imu_callback(self, msg: Imu) -> None:
@@ -119,6 +162,10 @@ class CDPRCalibrationRecorder:
         )
         if not np.all(np.isfinite(quat)) or np.linalg.norm(quat) < 1e-12:
             return
+        if self._imu_extrinsic is not None:
+            corrected = self._imu_extrinsic.apply_quat(quat)
+            if corrected is not None:
+                quat = corrected
 
         # SciPy uppercase "ZYX" corresponds to intrinsic ZYX Euler angles.
         # It returns angles in the same order requested: yaw, pitch, roll.
@@ -150,10 +197,16 @@ class CDPRCalibrationRecorder:
         rate = rospy.Rate(20.0)
         while not rospy.is_shutdown():
             with self.lock:
-                ready = bool(self.pose_buf and self.imu_buf and self.motor_abs_buf)
+                if self.imu_active:
+                    ready = bool(self.pose_buf and self.imu_buf and self.motor_abs_buf)
+                else:
+                    ready = bool(self.pose_buf and self.motor_abs_buf)
             if ready:
                 return
-            rospy.loginfo_throttle(2.0, "Waiting for pose, imu and motor_pos_abs messages...")
+            if self.imu_active:
+                rospy.loginfo_throttle(2.0, "Waiting for pose, imu and motor_pos_abs messages...")
+            else:
+                rospy.loginfo_throttle(2.0, "Waiting for pose and motor_pos_abs messages (mocap ypr, no IMU)...")
             rate.sleep()
 
     def record_initial_motor_pos_abs(self) -> np.ndarray:
@@ -192,6 +245,8 @@ class CDPRCalibrationRecorder:
             "theta_definition": "(motor_pos_abs - init_motor_pos_abs) / 10000 * 2*pi",
             "counts_per_revolution": COUNTS_PER_REV,
             "init_motor_topic": "motor_pos_abs",
+            "imu_active": self.imu_active,
+            "ypr_source": "imu" if self.imu_active else "mocap",
         }
         with self.output_path.open("w", encoding="utf-8") as f:
             f.write(f"# cdpr_calib_metadata {json.dumps(metadata, separators=(',', ':'))}\n")
@@ -201,8 +256,8 @@ class CDPRCalibrationRecorder:
         """
         Average the window after Enter is pressed and append one calibration row.
 
-        Returns False when one of the three topics does not have enough data in
-        the requested window; the user can keep the CDPR still and press Enter again.
+        Returns False when pose or motor data (and IMU when imu_active) lack samples
+        in the requested window; the user can keep the CDPR still and press Enter again.
         """
         start = rospy.Time.now().to_sec()
         end = start + self.window_sec
@@ -213,21 +268,32 @@ class CDPRCalibrationRecorder:
         end = rospy.Time.now().to_sec()
         with self.lock:
             pose_values = values_in_window(self.pose_buf, start, end)
-            imu_values = values_in_window(self.imu_buf, start, end)
+            imu_values = values_in_window(self.imu_buf, start, end) if self.imu_active else np.empty((0, 3), dtype=float)
             motor_abs_values = values_in_window(self.motor_abs_buf, start, end)
 
-        if pose_values.size == 0 or imu_values.size == 0 or motor_abs_values.size == 0:
+        if pose_values.size == 0 or motor_abs_values.size == 0:
             rospy.logwarn(
-                "Not enough data after Enter in %.2f s window: pose=%d imu=%d motor_abs=%d",
+                "Not enough data after Enter in %.2f s window: pose=%d motor_abs=%d",
                 self.window_sec,
                 pose_values.shape[0],
+                motor_abs_values.shape[0],
+            )
+            return False
+        if self.imu_active and imu_values.size == 0:
+            rospy.logwarn(
+                "Not enough data after Enter in %.2f s window: imu=%d (pose=%d motor_abs=%d)",
+                self.window_sec,
                 imu_values.shape[0],
+                pose_values.shape[0],
                 motor_abs_values.shape[0],
             )
             return False
 
-        pos_mean = np.mean(pose_values, axis=0)
-        ypr_mean = mean_ypr(imu_values)
+        pos_mean = np.mean(pose_values[:, 0:3], axis=0)
+        if self.imu_active:
+            ypr_mean = mean_ypr(imu_values)
+        else:
+            ypr_mean = mean_ypr(pose_values[:, 3:6])
         motor_abs_mean = np.mean(motor_abs_values, axis=0)
         theta_mean = (motor_abs_mean - self.init_motor_pos_abs) / COUNTS_PER_REV * (2.0 * math.pi)
         if self.angle_degrees:
@@ -240,13 +306,21 @@ class CDPRCalibrationRecorder:
             f.write(" ".join(f"{v:.10g}" for v in row))
             f.write("\n")
 
-        rospy.loginfo(
-            "Recorded sample: pose=%d imu=%d motor_abs=%d -> %s",
-            pose_values.shape[0],
-            imu_values.shape[0],
-            motor_abs_values.shape[0],
-            self.output_path,
-        )
+        if self.imu_active:
+            rospy.loginfo(
+                "Recorded sample: pose=%d imu=%d motor_abs=%d -> %s",
+                pose_values.shape[0],
+                imu_values.shape[0],
+                motor_abs_values.shape[0],
+                self.output_path,
+            )
+        else:
+            rospy.loginfo(
+                "Recorded sample: pose=%d (mocap ypr) motor_abs=%d -> %s",
+                pose_values.shape[0],
+                motor_abs_values.shape[0],
+                self.output_path,
+            )
         return True
 
     def run(self) -> None:
@@ -285,6 +359,30 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Write yaw/pitch/roll in degrees. Default is radians for calibrate_cdpr_kinematics.py.",
     )
+    imu_grp = parser.add_mutually_exclusive_group()
+    imu_grp.add_argument(
+        "--imu-active",
+        dest="imu_active",
+        action="store_true",
+        help="Use IMU quaternion for yaw/pitch/roll (default).",
+    )
+    imu_grp.add_argument(
+        "--no-imu-active",
+        dest="imu_active",
+        action="store_false",
+        help="Use mocap pose quaternion for yaw/pitch/roll; do not subscribe to IMU.",
+    )
+    parser.set_defaults(imu_active=True)
+    parser.add_argument(
+        "--imu-extrinsic-file",
+        default="cdpr_imu_extrinsic.json",
+        help="JSON with R_imu_to_body; applied when --imu-active.",
+    )
+    parser.add_argument(
+        "--no-imu-extrinsic",
+        action="store_true",
+        help="Do not apply cdpr_imu_extrinsic.json to IMU orientation.",
+    )
     return parser.parse_args()
 
 
@@ -293,6 +391,11 @@ def main() -> None:
     ts = datetime.now().strftime("%m%d%H%M")
     args.output = args.output.with_name(f"{args.output.stem}_{ts}{args.output.suffix}")
     rospy.init_node("record_cdpr_calib_data", anonymous=False)
+    imu_active = _as_bool(rospy.get_param("~imu_active", args.imu_active))
+    apply_imu_extrinsic = _as_bool(
+        rospy.get_param("~apply_imu_extrinsic", not args.no_imu_extrinsic)
+    )
+    imu_extrinsic_file = rospy.get_param("~imu_extrinsic_file", args.imu_extrinsic_file)
     recorder = CDPRCalibrationRecorder(
         output_path=args.output,
         window_sec=args.window,
@@ -301,6 +404,14 @@ def main() -> None:
         motor_abs_topic=args.motor_abs_topic,
         init_motor_window_sec=args.init_motor_window,
         angle_degrees=args.angle_degrees,
+        imu_active=imu_active,
+        imu_extrinsic_file=imu_extrinsic_file,
+        apply_imu_extrinsic=apply_imu_extrinsic,
+    )
+    rospy.loginfo(
+        "record_cdpr_calib_data: imu_active=%s (%s for ypr)",
+        str(imu_active),
+        "IMU" if imu_active else "mocap",
     )
     recorder.run()
 

@@ -229,6 +229,45 @@ def forward_kinematics_lm_xyz_with_fixed_attitude(
     return r
 
 
+def forward_kinematics_lm_xyz_with_fixed_attitude_and_prior(
+    r0: np.ndarray,
+    theta_ba: np.ndarray,
+    lengths: np.ndarray,
+    geom: CDPRGeometry,
+    r_prior: np.ndarray,
+    damping: float = 1e-3,
+    reg_weights: np.ndarray = None,
+    prior_weights: np.ndarray = None,
+    max_iters: int = 20,
+    tol_step: float = 1e-8,
+    tol_res: float = 1e-8,
+) -> np.ndarray:
+    """LM FK for position only (fixed attitude) with quadratic prior on xyz.
+
+    Minimize: ||f(r)||^2 + ||W_p (r - r_prior)||^2
+    """
+    r = r0.copy()
+    if reg_weights is None:
+        reg_weights = np.array([1.0, 1.0, 1.0], dtype=float)
+    if prior_weights is None:
+        prior_weights = np.array([2.0, 2.0, 2.0], dtype=float)
+    w = np.diag(reg_weights)
+    wp = np.diag(prior_weights)
+
+    for _ in range(max_iters):
+        f, j = fk_xyz_residual_and_jacobian(r, theta_ba, lengths, geom)
+        e_prior = r - r_prior
+        lhs = j.T @ j + wp.T @ wp + damping * w
+        rhs = j.T @ f + wp.T @ wp @ e_prior
+        step = np.linalg.solve(lhs, rhs)
+        r_new = r - step
+        if np.linalg.norm(step) < tol_step or np.linalg.norm(f) < tol_res:
+            r = r_new
+            break
+        r = r_new
+    return r
+
+
 def forward_kinematics_lm(
     rho0: np.ndarray,
     lengths: np.ndarray,
@@ -314,8 +353,8 @@ class EulerEKFCDPR:
         self.q = np.diag(
             np.hstack(
                 [
-                    np.full(3, 0.08**2),
-                    np.full(3, np.deg2rad(0.6) ** 2),
+                    np.full(3, 0.097**2),
+                    np.full(3, np.deg2rad(0.56) ** 2),
                     np.full(3, 2e-4**2),
                     np.full(3, np.deg2rad(0.02) ** 2),
                 ]
@@ -326,8 +365,8 @@ class EulerEKFCDPR:
         self.r = np.diag(
             np.hstack(
                 [
-                    np.full(3, 0.02**2),
-                    np.full(3, np.deg2rad(1) ** 2),
+                    np.full(3, 0.002**2),
+                    np.full(3, np.deg2rad(0.1) ** 2),
                 ]
             )
         )

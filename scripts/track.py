@@ -63,7 +63,7 @@ euler_save_path = folder + 'euler_' + time_str + '.txt'
 
 if __name__ == "__main__":
 
-    cdpr = CDPR(imu_active=False, is_calibrated=True, calibration_file='synth_calib_33.json')
+    cdpr = CDPR(imu_active=False, is_calibrated=True, calibration_file='cdpr_kinematic_calib.json')
     if cdpr.imu_active:
         wait_for_stable_imu_pub(cdpr.imu_topic)
 
@@ -92,8 +92,8 @@ if __name__ == "__main__":
     start_euler = R.from_quat(quat0).as_euler('ZYX', degrees=False)
     start_point = np.concatenate([start_pos, start_euler])
     print(start_point)
-    way_point1 = start_point + np.array([0., 0., -0, 0.0, 0.0, 0.0])
-    way_point1[3:6] = np.array([0, 0, -0]) / 180 * np.pi
+    way_point1 = start_point + np.array([-0., 0.2, -0., 0.0, 0.0, 0.0])
+    way_point1[3:6] = np.array([0, 0, 0]) / 180 * np.pi
     # way_point1[2] = 0.65
     # way_point1 = np.array([-1.1774, -0.7348, 0.72, 0, 0, 0])
     # way_point1 = np.array([-1.1574, -0.7348, 0.72, 0, 0, 0])

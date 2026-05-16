@@ -13,7 +13,7 @@ from jacobian import get_jacobian
 
 class JoystickClosedLoopController:
     def __init__(self):
-        self.cdpr = CDPR(imu_active=False, is_calibrated=True, calibration_file='synth_calib_33.json')
+        self.cdpr = CDPR(imu_active=False, is_calibrated=True, calibration_file="cdpr_kinematic_calib.json")
 
         self.control_period = rospy.get_param("~control_period", 1.0 / 15)
         self.coil_radius = rospy.get_param("~coil_radius", 0.025)

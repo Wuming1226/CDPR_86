@@ -25,14 +25,18 @@
   <arg name="remote2_imu_topic" default="/imu" />
   <arg name="remote2_imu_wait_timeout" default="5.0" />
   <arg name="post_restart_wait_s" default="1.0" />
-  <arg name="fk_xyz_only_with_imu_rpy" default="true" />
-  <arg name="mocap_rpy_from_imu" default="true" />
+  <arg name="fk_with_given_rpy" default="true" />
+  <arg name="rpy_from_imu" default="true" />
+  <arg name="fk_use_prior" default="true" />
+  <arg name="fk_prior_pos_weight" default="5.0" />
+  <arg name="fk_prior_att_weight" default="10.0" />
   <arg name="fk_topic" default="/fk_pose" />
   <arg name="cdpr_is_calibrated" default="true" />
-  <arg name="cdpr_calibration_file" default="synth_calib_33.json" />
+  <arg name="cdpr_use_calibrated_cable_length" default="false" />
+  <arg name="cdpr_calibration_file" default="cdpr_kinematic_calib.json" />
 
   <!-- Local EKF startup -->
-  <arg name="local_ekf_command" default="rosrun cdpr_86_host cdpr_euler_ekf_ros_node.py _fk_xyz_only_with_imu_rpy:=$(arg fk_xyz_only_with_imu_rpy) _fk_pose_topic:=$(arg fk_topic) _is_calibrated:=$(arg cdpr_is_calibrated) _calibration_file:=$(arg cdpr_calibration_file)" />
+  <arg name="local_ekf_command" default="rosrun cdpr_86_host cdpr_euler_ekf_ros_node.py _fk_with_given_rpy:=$(arg fk_with_given_rpy) _rpy_from_imu:=$(arg rpy_from_imu) _fk_use_prior:=$(arg fk_use_prior) _fk_prior_pos_weight:=$(arg fk_prior_pos_weight) _fk_prior_att_weight:=$(arg fk_prior_att_weight) _fk_pose_topic:=$(arg fk_topic) _is_calibrated:=$(arg cdpr_is_calibrated) _use_calibrated_cable_length:=$(arg cdpr_use_calibrated_cable_length) _calibration_file:=$(arg cdpr_calibration_file)" />
 
   <node pkg="cdpr_86_host"
         type="remote_motor_ekf_bootstrap.py"
@@ -54,6 +58,7 @@
     <param name="remote2_process_pattern" value="$(arg remote2_process_pattern)" />
     <param name="remote2_start_command" value="$(arg remote2_start_command)" />
     <param name="remote2_log_file" value="$(arg remote2_log_file)" />
+    <param name="remote2_enabled" value="$(arg rpy_from_imu)" />
     <param name="stop_remote2_on_shutdown" value="$(arg stop_remote2_on_shutdown)" />
 
     <param name="motor_topic" value="$(arg motor_topic)" />
@@ -69,8 +74,8 @@
         name="compare_plot"
         output="screen">
     <param name="fk_topic" value="$(arg fk_topic)" />
-    <param name="fk_xyz_only_with_imu_rpy" value="$(arg fk_xyz_only_with_imu_rpy)" />
-    <param name="mocap_rpy_from_imu" value="$(arg mocap_rpy_from_imu)" />
+    <param name="fk_with_given_rpy" value="$(arg fk_with_given_rpy)" />
+    <param name="rpy_from_imu" value="$(arg rpy_from_imu)" />
     <param name="is_calibrated" value="$(arg cdpr_is_calibrated)" />
     <param name="calibration_file" value="$(arg cdpr_calibration_file)" />
   </node>

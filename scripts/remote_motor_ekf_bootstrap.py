@@ -11,6 +11,14 @@ from sensor_msgs.msg import Imu
 from std_msgs.msg import Float32MultiArray
 
 
+def _as_bool(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)
+
+
 class RemoteMotorEkfBootstrap:
     def __init__(self) -> None:
         self.remote_host = rospy.get_param("~remote_host", "192.168.5.104")
@@ -31,7 +39,8 @@ class RemoteMotorEkfBootstrap:
         self.remote2_start_command = rospy.get_param("~remote2_start_command", "rosrun cdpr_86_actuator cdpr_86.py")
         self.remote2_setup_script = rospy.get_param("~remote2_setup_script", "~/CDPR_86/devel/setup.bash")
         self.remote2_log_file = rospy.get_param("~remote2_log_file", "~/remote2_bootstrap.log")
-        self.stop_remote2_on_shutdown = bool(rospy.get_param("~stop_remote2_on_shutdown", True))
+        self.remote2_enabled = _as_bool(rospy.get_param("~remote2_enabled", True))
+        self.stop_remote2_on_shutdown = _as_bool(rospy.get_param("~stop_remote2_on_shutdown", True))
         self.remote2_imu_topic = rospy.get_param("~remote2_imu_topic", "/imu")
         self.remote2_imu_wait_timeout = float(rospy.get_param("~remote2_imu_wait_timeout", 20.0))
 
@@ -39,7 +48,7 @@ class RemoteMotorEkfBootstrap:
             "~local_ekf_command",
             "rosrun cdpr_86_host cdpr_euler_ekf_ros_node.py",
         )
-        self.stop_remote_on_shutdown = bool(rospy.get_param("~stop_remote_on_shutdown", True))
+        self.stop_remote_on_shutdown = _as_bool(rospy.get_param("~stop_remote_on_shutdown", True))
 
         self.ekf_process = None
         self.remote_ssh_process = None
@@ -57,7 +66,8 @@ class RemoteMotorEkfBootstrap:
             self.motor_topic,
         )
         rospy.loginfo(
-            "Bootstrap remote2 params: remote=%s@%s:%d, setup=%s, pattern=%s, start_cmd=%s",
+            "Bootstrap remote2 params: enabled=%s, remote=%s@%s:%d, setup=%s, pattern=%s, start_cmd=%s",
+            str(self.remote2_enabled),
             self.remote2_user,
             self.remote2_host,
             self.remote2_port,
@@ -145,6 +155,9 @@ class RemoteMotorEkfBootstrap:
             )
 
     def _restart_remote2_node(self) -> None:
+        if not self.remote2_enabled:
+            rospy.loginfo("remote2_enabled=false; skip remote2 restart.")
+            return
         if not self.remote2_host or not self.remote2_start_command:
             raise RuntimeError("remote2_host/remote2_start_command is empty.")
 
@@ -214,6 +227,9 @@ class RemoteMotorEkfBootstrap:
             ) from exc
 
     def _wait_remote2_imu_ready(self) -> None:
+        if not self.remote2_enabled:
+            rospy.loginfo("remote2_enabled=false; skip IMU readiness wait.")
+            return
         try:
             rospy.wait_for_message(
                 self.remote2_imu_topic,
@@ -298,6 +314,8 @@ class RemoteMotorEkfBootstrap:
             rospy.logwarn(result.stderr.strip())
 
     def _stop_remote2_node(self) -> None:
+        if not self.remote2_enabled:
+            return
         if self.remote2_ssh_process is not None and self.remote2_ssh_process.poll() is None:
             try:
                 os.killpg(os.getpgid(self.remote2_ssh_process.pid), signal.SIGTERM)
@@ -342,10 +360,12 @@ class RemoteMotorEkfBootstrap:
     def run(self) -> int:
         rospy.loginfo("Restart remote motor node and then launch local EKF.")
         self._restart_remote_motor_node()
-        self._restart_remote2_node()
+        if self.remote2_enabled:
+            self._restart_remote2_node()
         time.sleep(self.post_restart_wait_s)
         self._wait_motor_topic_ready()
-        self._wait_remote2_imu_ready()
+        if self.remote2_enabled:
+            self._wait_remote2_imu_ready()
         rospy.loginfo("%s is ready.", self.motor_topic)
         self._start_local_ekf()
         return self.ekf_process.wait()
@@ -365,9 +385,10 @@ def main() -> None:
         tail = node._tail_remote_log()
         if tail:
             rospy.logerr("Remote log tail:\n%s", tail)
-        tail2 = node._tail_remote2_log()
-        if tail2:
-            rospy.logerr("Remote2 log tail:\n%s", tail2)
+        if node.remote2_enabled:
+            tail2 = node._tail_remote2_log()
+            if tail2:
+                rospy.logerr("Remote2 log tail:\n%s", tail2)
         code = 1
     node.cleanup()
     sys.exit(code)

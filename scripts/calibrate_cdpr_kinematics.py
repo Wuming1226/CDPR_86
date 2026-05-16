@@ -9,15 +9,17 @@ Optional metadata line, usually written by record_cdpr_calib_data.py:
     # cdpr_calib_metadata {"init_motor_pos_abs":[...]}
 
 Use --rows to calibrate on a subset of loaded numeric rows (0-based slice list; see --rows help).
+Use --calibrate-params to choose whether a, b, yaw0 and r are optimized.
 
-The script estimates 57 parameters:
+The script estimates 65 parameters:
     l0      : 8 cable original lengths
     a       : 8 frame anchor points in world/base coordinates, shape (8, 3)
     b       : 8 platform anchor points in end-effector coordinates, shape (8, 3)
     yaw0    : IMU initial heading offset
+    r       : 8 drum radii, one per motor/cable
 
 Kinematic model for cable i at sample k:
-    residual_i = ||a_i - Rz(yaw + yaw0) Ry(pitch) Rx(roll) b_i - p|| - l0_i - s_i r theta_i
+    residual_i = ||a_i - Rz(yaw + yaw0) Ry(pitch) Rx(roll) b_i - p|| - l0_i - s_i r_i theta_i
 
 Motor sign convention follows cdpr.py:
     s = [-1, +1, -1, +1, -1, +1, -1, +1]
@@ -33,6 +35,7 @@ Example:
     python3 calibrate_cdpr_kinematics.py samples.txt --radius 0.020 --ypr-degrees
     python3 calibrate_cdpr_kinematics.py samples.txt --radius 0.025 --rows "1:3,10:20,-5:"
     python3 calibrate_cdpr_kinematics.py samples.txt --radius 0.025 --rows "[1:3，5：13，-13：-1]"
+    python3 calibrate_cdpr_kinematics.py samples.txt --radius 0.025 --calibrate-params '{"a": false, "b": true, "yaw0": false, "r": true}'
 """
 
 import argparse
@@ -46,8 +49,9 @@ from scipy.optimize import least_squares
 
 
 N_CABLES = 8
-N_PARAMS = 8 + 8 * 3 + 8 * 3 + 1
+N_PARAMS = 8 + 8 * 3 + 8 * 3 + 1 + 8
 MOTOR_TO_LENGTH_SIGN = np.array([-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0], dtype=float)
+DEFAULT_CALIBRATE_PARAMS = {"a": True, "b": True, "yaw0": True, "r": True}
 
 
 # Fallback nominal geometry from cdpr.py / cdpr_euler_ekf.py.
@@ -177,6 +181,30 @@ def parse_row_indices(spec: str, n_rows: int) -> np.ndarray:
     return out
 
 
+def parse_calibrate_params(spec: str) -> Dict[str, bool]:
+    """Parse a JSON dict selecting which parameter groups to optimize."""
+    if not spec:
+        return DEFAULT_CALIBRATE_PARAMS.copy()
+    try:
+        raw = json.loads(spec)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"--calibrate-params should be a JSON dict: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError("--calibrate-params should be a JSON dict with keys: a, b, yaw0, r")
+
+    allowed = set(DEFAULT_CALIBRATE_PARAMS)
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError(f"Unknown --calibrate-params keys: {unknown}; allowed keys: {sorted(allowed)}")
+
+    out = DEFAULT_CALIBRATE_PARAMS.copy()
+    for key, value in raw.items():
+        if not isinstance(value, bool):
+            raise ValueError(f"--calibrate-params[{key!r}] should be true or false, got {value!r}")
+        out[key] = value
+    return out
+
+
 def load_sample_metadata(path: Path) -> Dict[str, object]:
     """Read optional JSON metadata from a comment line in the calibration txt."""
     prefix = "# cdpr_calib_metadata "
@@ -231,23 +259,45 @@ def load_samples(path: Path, ypr_degrees: bool, theta_degrees: bool) -> Tuple[np
     return p, ypr, theta
 
 
-def unpack_params(x: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
-    """Convert the flat 57-vector into l0, a, b and yaw0."""
+def unpack_params(x: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, np.ndarray]:
+    """Convert the flat parameter vector into l0, a, b, yaw0 and r."""
     l0 = x[0:8]
     a = x[8:32].reshape(N_CABLES, 3)
     b = x[32:56].reshape(N_CABLES, 3)
     yaw0 = float(x[56])
-    return l0, a, b, yaw0
+    r = x[57:65]
+    return l0, a, b, yaw0, r
 
 
-def pack_params(l0: np.ndarray, a: np.ndarray, b: np.ndarray, yaw0: float) -> np.ndarray:
-    """Convert l0, a, b and yaw0 into the flat parameter vector used by LM."""
-    return np.hstack([l0.reshape(-1), a.reshape(-1), b.reshape(-1), np.array([yaw0])])
+def pack_params(l0: np.ndarray, a: np.ndarray, b: np.ndarray, yaw0: float, r: np.ndarray) -> np.ndarray:
+    """Convert l0, a, b, yaw0 and r into the flat parameter vector used by LM."""
+    return np.hstack([l0.reshape(-1), a.reshape(-1), b.reshape(-1), np.array([yaw0]), r.reshape(-1)])
+
+
+def active_parameter_indices(calibrate_params: Dict[str, bool]) -> np.ndarray:
+    """Return flat parameter indices optimized by LM. l0 is always calibrated."""
+    chunks = [np.arange(0, 8, dtype=int)]
+    if calibrate_params["a"]:
+        chunks.append(np.arange(8, 32, dtype=int))
+    if calibrate_params["b"]:
+        chunks.append(np.arange(32, 56, dtype=int))
+    if calibrate_params["yaw0"]:
+        chunks.append(np.array([56], dtype=int))
+    if calibrate_params["r"]:
+        chunks.append(np.arange(57, 65, dtype=int))
+    return np.concatenate(chunks)
+
+
+def expand_active_params(x_active: np.ndarray, x_reference: np.ndarray, active_idx: np.ndarray) -> np.ndarray:
+    """Fill active values into a full parameter vector, keeping inactive groups fixed."""
+    x_full = x_reference.copy()
+    x_full[active_idx] = x_active
+    return x_full
 
 
 def model_lengths(p: np.ndarray, ypr: np.ndarray, x: np.ndarray) -> np.ndarray:
     """Compute geometric cable lengths ||a - R b - p|| for all samples and cables."""
-    _, a, b, yaw0 = unpack_params(x)
+    _, a, b, yaw0, _ = unpack_params(x)
     lengths = np.zeros((p.shape[0], N_CABLES), dtype=float)
     for k in range(p.shape[0]):
         yaw_meas, pitch, roll = ypr[k]
@@ -263,11 +313,12 @@ def residuals(x: np.ndarray, p: np.ndarray, ypr: np.ndarray, theta: np.ndarray, 
     Residual vector stacked sample-by-sample.
 
     For each row and each cable:
-        f = geometric_length - l0 - motor_to_length_sign * radius * theta
+        f = geometric_length - l0 - motor_to_length_sign * r_i * theta
     """
-    l0, _, _, _ = unpack_params(x)
+    del radius
+    l0, _, _, _, r = unpack_params(x)
     geom_lengths = model_lengths(p, ypr, x)
-    encoder_lengths = radius * theta * MOTOR_TO_LENGTH_SIGN.reshape(1, N_CABLES)
+    encoder_lengths = theta * (MOTOR_TO_LENGTH_SIGN * r).reshape(1, N_CABLES)
     return (geom_lengths - l0.reshape(1, N_CABLES) - encoder_lengths).reshape(-1)
 
 
@@ -279,13 +330,12 @@ def residual_jacobian(
     radius: float,
 ) -> np.ndarray:
     """
-    Analytic Jacobian of residuals with respect to the 57 parameters.
+    Analytic Jacobian of residuals with respect to the full parameter vector.
 
-    theta and radius are not differentiated because encoder readings and drum
-    radius are treated as known measurements/configuration in this calibration.
+    Encoder readings are measurements; drum radii are parameters in x.
     """
-    del theta, radius
-    _, a, b, yaw0 = unpack_params(x)
+    del radius
+    _, a, b, yaw0, _ = unpack_params(x)
     n_samples = p.shape[0]
     J = np.zeros((n_samples * N_CABLES, N_PARAMS), dtype=float)
 
@@ -319,18 +369,50 @@ def residual_jacobian(
             # yaw0 only changes yaw, so d/dyaw0 ||d|| = unit^T (-dR/dyaw b_i).
             J[row, 56] = -float(unit @ (dR_dyaw0 @ b[i]))
 
+            # r_i enters as "-s_i * r_i * theta_i".
+            J[row, 57 + i] = -MOTOR_TO_LENGTH_SIGN[i] * theta[k, i]
+
     return J
+
+
+def residuals_active(
+    x_active: np.ndarray,
+    x_reference: np.ndarray,
+    active_idx: np.ndarray,
+    p: np.ndarray,
+    ypr: np.ndarray,
+    theta: np.ndarray,
+    radius: float,
+) -> np.ndarray:
+    """Residuals for the active optimization vector."""
+    x_full = expand_active_params(x_active, x_reference, active_idx)
+    return residuals(x_full, p, ypr, theta, radius)
+
+
+def residual_jacobian_active(
+    x_active: np.ndarray,
+    x_reference: np.ndarray,
+    active_idx: np.ndarray,
+    p: np.ndarray,
+    ypr: np.ndarray,
+    theta: np.ndarray,
+    radius: float,
+) -> np.ndarray:
+    """Jacobian projected to the active optimization vector."""
+    x_full = expand_active_params(x_active, x_reference, active_idx)
+    return residual_jacobian(x_full, p, ypr, theta, radius)[:, active_idx]
 
 
 def params_to_dict(x: np.ndarray, cost_info: Dict[str, object] = None) -> Dict[str, object]:
     """Make a JSON-friendly result dictionary."""
-    l0, a, b, yaw0 = unpack_params(x)
+    l0, a, b, yaw0, r = unpack_params(x)
     out = {
         "l0": l0.tolist(),
         "a": a.tolist(),
         "b": b.tolist(),
         "yaw0": wrap_angle(yaw0),
         "yaw0_raw": yaw0,
+        "r": r.tolist(),
     }
     if cost_info:
         out.update(cost_info)
@@ -349,18 +431,22 @@ def make_initial_guess(
     theta: np.ndarray,
     radius: float,
     init_path: Path = None,
+    calibrate_params: Dict[str, bool] = None,
 ) -> np.ndarray:
     """
     Build the LM initial value.
 
-    If --init is not provided, use the nominal CDPR geometry and estimate l0 by
-    averaging geometric_length - motor_to_length_sign * radius * theta over all
-    samples. This makes the initial residual mean close to zero for every cable.
+    If --init is not provided, use the nominal CDPR geometry and --radius as
+    r1..r8. Estimate l0 by averaging geometric_length - motor_to_length_sign *
+    r_i * theta over all samples. This makes the initial residual mean close to
+    zero for every cable.
     """
     a = DEFAULT_A.copy()
     b = DEFAULT_B.copy()
     yaw0 = 0.0
+    r = np.full(N_CABLES, float(radius), dtype=float)
     l0 = None
+    calibrate_params = calibrate_params or DEFAULT_CALIBRATE_PARAMS
 
     if init_path is not None:
         init = load_initial_json(init_path)
@@ -372,14 +458,27 @@ def make_initial_guess(
             yaw0 = float(init["yaw0"])
         if "l0" in init:
             l0 = np.asarray(init["l0"], dtype=float).reshape(N_CABLES)
+        if "r" in init:
+            r = np.asarray(init["r"], dtype=float).reshape(N_CABLES)
+        elif "radius" in init:
+            radius_init = np.asarray(init["radius"], dtype=float).reshape(-1)
+            if radius_init.size == 1:
+                r = np.full(N_CABLES, float(radius_init[0]), dtype=float)
+            elif radius_init.size == N_CABLES:
+                r = radius_init.astype(float)
+            else:
+                raise ValueError(f"init radius should have 1 or {N_CABLES} values, got {radius_init.size}")
+
+    if not calibrate_params["yaw0"]:
+        yaw0 = 0.0
 
     if l0 is None:
-        x_tmp = pack_params(np.zeros(N_CABLES, dtype=float), a, b, yaw0)
+        x_tmp = pack_params(np.zeros(N_CABLES, dtype=float), a, b, yaw0, r)
         geom_lengths = model_lengths(p, ypr, x_tmp)
-        encoder_lengths = radius * theta * MOTOR_TO_LENGTH_SIGN.reshape(1, N_CABLES)
+        encoder_lengths = theta * (MOTOR_TO_LENGTH_SIGN * r).reshape(1, N_CABLES)
         l0 = np.mean(geom_lengths - encoder_lengths, axis=0)
 
-    return pack_params(l0, a, b, yaw0)
+    return pack_params(l0, a, b, yaw0, r)
 
 
 def summarize_residuals(res: np.ndarray) -> Dict[str, object]:
@@ -403,7 +502,10 @@ def parse_args() -> argparse.Namespace:
         "--radius",
         type=float,
         required=True,
-        help="Drum radius r in meters. Encoder theta is assumed to be radians unless --theta-degrees is set.",
+        help=(
+            "Reference drum radius in meters. Used as r1..r8 initial/reference values; "
+            "encoder theta is assumed radians unless --theta-degrees is set."
+        ),
     )
     parser.add_argument("--init", type=Path, default=None, help="Optional JSON initial guess.")
     parser.add_argument("--output", type=Path, default=Path("cdpr_kinematic_calib.json"), help="Output JSON path.")
@@ -420,11 +522,23 @@ def parse_args() -> argparse.Namespace:
             "Example: '1:3,10:20,-5:' or '[1:3，10：20，-5：]' Default: all rows."
         ),
     )
+    parser.add_argument(
+        "--calibrate-params",
+        type=str,
+        default=json.dumps(DEFAULT_CALIBRATE_PARAMS),
+        help=(
+            "JSON dict selecting optimized groups among a, b, yaw0. Missing keys default true. "
+            "l0 is always calibrated. If a/b is false, it stays at the reference initial value; "
+            "if yaw0 is false, it stays at 0; if r is false, it stays at --radius or init r. "
+            "Example: '{\"a\": false, \"b\": true, \"yaw0\": false, \"r\": true}'"
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    calibrate_params = parse_calibrate_params(args.calibrate_params)
     metadata = load_sample_metadata(args.data)
     init_motor_pos_abs = normalized_init_motor_pos_abs(metadata)
     p, ypr, theta = load_samples(args.data, args.ypr_degrees, args.theta_degrees)
@@ -446,36 +560,45 @@ def main() -> None:
         print(f"Using all {n_rows_loaded} samples.")
 
     n_residuals = p.shape[0] * N_CABLES
-    if n_residuals < N_PARAMS:
+    active_idx = active_parameter_indices(calibrate_params)
+    n_active_params = int(active_idx.size)
+    if n_residuals < n_active_params:
         raise ValueError(
-            f"Need at least {N_PARAMS} residuals for LM, got {n_residuals}. "
+            f"Need at least {n_active_params} residuals for LM, got {n_residuals}. "
             "Use at least 8 calibration poses, and preferably many more with diverse motion."
         )
 
-    x0 = make_initial_guess(p, ypr, theta, args.radius, args.init)
+    x0 = make_initial_guess(p, ypr, theta, args.radius, args.init, calibrate_params)
+    x0_active = x0[active_idx]
     res0 = residuals(x0, p, ypr, theta, args.radius)
-    print(f"Loaded {p.shape[0]} samples, {n_residuals} residuals, {N_PARAMS} parameters.")
+    print(
+        f"Loaded {p.shape[0]} samples, {n_residuals} residuals, "
+        f"{n_active_params} active parameters ({N_PARAMS} full parameters)."
+    )
+    print(f"Calibrate params: {calibrate_params}")
     print(f"Initial RMSE: {np.sqrt(np.mean(res0 ** 2)):.6f} m")
 
     # method="lm" selects Levenberg-Marquardt. It does not support bounds, so
     # good initial values and rich excitation in the calibration data matter.
     result = least_squares(
-        residuals,
-        x0,
-        jac=residual_jacobian,
+        residuals_active,
+        x0_active,
+        jac=residual_jacobian_active,
         method="lm",
-        args=(p, ypr, theta, args.radius),
+        args=(x0, active_idx, p, ypr, theta, args.radius),
         max_nfev=args.max_nfev,
         x_scale="jac",
     )
 
-    res_final = residuals(result.x, p, ypr, theta, args.radius)
+    x_final = expand_active_params(result.x, x0, active_idx)
+    res_final = residuals(x_final, p, ypr, theta, args.radius)
     stats = summarize_residuals(res_final)
     result_dict = params_to_dict(
-        result.x,
+        x_final,
         {
             "success": bool(result.success),
             "message": result.message,
+            "calibrate_params": calibrate_params,
             "init_motor_pos_abs": init_motor_pos_abs,
             "motor_to_length_sign": MOTOR_TO_LENGTH_SIGN.tolist(),
             "n_rows_loaded": n_rows_loaded,
@@ -483,7 +606,8 @@ def main() -> None:
             "row_indices": row_idx.tolist(),
             "n_samples": int(p.shape[0]),
             "n_residuals": int(n_residuals),
-            "n_parameters": int(N_PARAMS),
+            "n_parameters": int(n_active_params),
+            "n_parameters_full": int(N_PARAMS),
             "nfev": int(result.nfev),
             "cost": float(result.cost),
             "initial_rmse_m": float(np.sqrt(np.mean(res0**2))),
@@ -500,6 +624,7 @@ def main() -> None:
     print(f"Final RMSE: {stats['rmse_m']:.6f} m")
     print(f"Max |residual|: {stats['max_abs_m']:.6f} m")
     print(f"yaw0: {result_dict['yaw0']:.9f} rad ({math.degrees(result_dict['yaw0']):.6f} deg)")
+    print(f"r: {result_dict['r']}")
     print(f"Saved: {args.output}")
 
 

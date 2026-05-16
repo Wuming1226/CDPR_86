@@ -14,6 +14,15 @@ from sensor_msgs.msg import Imu
 from std_msgs.msg import Float32MultiArray
 
 from jacobian import get_jacobian
+from imu_extrinsic import ImuExtrinsic, load_extrinsic_for_node
+
+
+def _as_bool(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)
 
 
 class CDPR:
@@ -23,9 +32,16 @@ class CDPR:
         imu_active: bool = False,
         imu_topic: str = "/imu",
         is_calibrated: bool = False,
+        use_calibrated_cable_length: bool = None,
         calibration_file: str = None,
+        imu_extrinsic_file: str = None,
+        apply_imu_extrinsic: bool = True,
+        imu_extrinsic: ImuExtrinsic = None,
     ):
         self.is_calibrated = bool(is_calibrated)
+        if use_calibrated_cable_length is None:
+            use_calibrated_cable_length = self.is_calibrated
+        self.use_calibrated_cable_length = bool(use_calibrated_cable_length)
         self.calibration_file = calibration_file
         self._kinematic_calibration = None
 
@@ -65,10 +81,11 @@ class CDPR:
         self._anchorB8 = np.array([0.184, 0.125, -0.110])
         self.b_matrix = np.vstack([self._anchorB1, self._anchorB2, self._anchorB3, self._anchorB4,
                                    self._anchorB5, self._anchorB6, self._anchorB7, self._anchorB8])
+        self.cable_radii = np.full(8, 0.025, dtype=float)
 
         if self.is_calibrated:
             if calibration_file is None:
-                calibration_file = Path(__file__).resolve().with_name("synth_calib.json")
+                calibration_file = Path(__file__).resolve().with_name("cdpr_kinematic_calib.json")
             self._kinematic_calibration = self.load_kinematic_calibration(calibration_file)
 
         # ros settings
@@ -76,10 +93,33 @@ class CDPR:
             rospy.init_node('cdpr_control', anonymous=False)
             print(rospy.get_name())
 
+        try:
+            self.use_calibrated_cable_length = _as_bool(
+                rospy.get_param("~use_calibrated_cable_length", self.use_calibrated_cable_length)
+            )
+        except rospy.ROSException:
+            pass
+
         self.imu_active = bool(imu_active)
         self.imu_topic = imu_topic
         self.imu_wait_timeout = float(rospy.get_param("~imu_wait_timeout", 2.0))
         self._imu_quat = None  # scipy quat: [x, y, z, w]
+        self._imu_extrinsic = imu_extrinsic
+        if self.imu_active and apply_imu_extrinsic and self._imu_extrinsic is None:
+            ext_path = imu_extrinsic_file
+            if ext_path is None:
+                ext_path = rospy.get_param("~imu_extrinsic_file", "cdpr_imu_extrinsic.json")
+            self._imu_extrinsic = load_extrinsic_for_node(
+                ext_path,
+                enabled=True,
+                node_name="CDPR",
+            )
+        if self._imu_extrinsic is not None:
+            rospy.loginfo(
+                "CDPR IMU extrinsic loaded (n=%d, residual_rms=%.4f deg).",
+                self._imu_extrinsic.n_samples,
+                self._imu_extrinsic.residual_angle_deg_rms,
+            )
 
         self._velo_pub = rospy.Publisher('motor_velo', Float32MultiArray, queue_size=10)
         self._cable_len_pub = rospy.Publisher('cable_lengths_measure', CableLengthsStamped, queue_size=50)
@@ -95,14 +135,16 @@ class CDPR:
         if self.imu_active:
             try:
                 imu_msg = rospy.wait_for_message(self.imu_topic, Imu, timeout=self.imu_wait_timeout)
-                self._imu_quat = np.array(
-                    [
-                        imu_msg.orientation.x,
-                        imu_msg.orientation.y,
-                        imu_msg.orientation.z,
-                        imu_msg.orientation.w,
-                    ],
-                    dtype=float,
+                self._store_imu_quat(
+                    np.array(
+                        [
+                            imu_msg.orientation.x,
+                            imu_msg.orientation.y,
+                            imu_msg.orientation.z,
+                            imu_msg.orientation.w,
+                        ],
+                        dtype=float,
+                    )
                 )
                 rospy.loginfo("CDPR got first IMU message from %s before init_cable_length.", self.imu_topic)
             except rospy.ROSException:
@@ -117,22 +159,30 @@ class CDPR:
         self.init_motor_pos = np.array([0, 0, 0, 0, 0, 0, 0, 0], dtype=float)
         self.init_cable_lens = np.array([0., 0., 0., 0., 0., 0., 0., 0.])  # 初始化的类型必须是浮点！！！
 
-        if self.is_calibrated:
+        if self.is_calibrated and self.use_calibrated_cable_length:
             self.init_cable_lens = np.asarray(self._kinematic_calibration["l0"], dtype=float).reshape(8)
             self.init_motor_pos = np.asarray(
                 self._kinematic_calibration["init_motor_pos_abs"],
                 dtype=float,
             ).reshape(8)
-            rospy.loginfo("Loaded calibrated l0 and init_motor_pos_abs from %s.", self.calibration_file)
+            rospy.loginfo(
+                "Using calibrated cable lengths (l0, init_motor_pos_abs) from %s.",
+                self.calibration_file,
+            )
         else:
             self.init_cable_length()
 
         self._motor_pos_received = False
         rospy.Subscriber('motor_pos_abs', Float32MultiArray, self._motor_pos_callback, queue_size=1)
-        if not self.is_calibrated:
+        if not (self.is_calibrated and self.use_calibrated_cable_length):
             while not rospy.is_shutdown() and not self._motor_pos_received:
                 rospy.sleep(0.01)
             self.init_motor_pos = self.motor_pos.copy()
+            if self.is_calibrated and not self.use_calibrated_cable_length:
+                rospy.loginfo(
+                    "is_calibrated=true but use_calibrated_cable_length=false: "
+                    "initialized l0 from mocap and init_motor_pos from first motor_pos_abs."
+                )
 
     def load_kinematic_calibration(self, calibration_file):
         calibration_path = Path(calibration_file).expanduser()
@@ -144,6 +194,16 @@ class CDPR:
 
         a = np.asarray(calib["a"], dtype=float).reshape(8, 3)
         b = np.asarray(calib["b"], dtype=float).reshape(8, 3)
+        if "r" in calib:
+            self.cable_radii = np.asarray(calib["r"], dtype=float).reshape(8)
+        elif "radius" in calib:
+            radius = np.asarray(calib["radius"], dtype=float).reshape(-1)
+            if radius.size == 1:
+                self.cable_radii = np.full(8, float(radius[0]), dtype=float)
+            elif radius.size == 8:
+                self.cable_radii = radius.astype(float)
+            else:
+                raise ValueError(f"calibration radius should have 1 or 8 values, got {radius.size}")
 
         self._anchorA1, self._anchorA2, self._anchorA3, self._anchorA4 = a[0], a[1], a[2], a[3]
         self._anchorA5, self._anchorA6, self._anchorA7, self._anchorA8 = a[4], a[5], a[6], a[7]
@@ -233,21 +293,32 @@ class CDPR:
         cable_msg.lengths = self.calculate_cable_length_from_motor_pos(self.motor_pos).tolist()
         self._cable_len_pub.publish(cable_msg)
 
+    def _correct_imu_quat(self, quat_xyzw: np.ndarray) -> np.ndarray:
+        q = np.asarray(quat_xyzw, dtype=float).reshape(4)
+        if self._imu_extrinsic is None:
+            return q
+        corrected = self._imu_extrinsic.apply_quat(q)
+        return corrected if corrected is not None else q
+
+    def _store_imu_quat(self, quat_xyzw: np.ndarray) -> None:
+        self._imu_quat = self._correct_imu_quat(quat_xyzw)
+
     def _imu_callback(self, data: Imu):
-        self._imu_quat = np.array(
-            [data.orientation.x, data.orientation.y, data.orientation.z, data.orientation.w],
-            dtype=float,
+        self._store_imu_quat(
+            np.array(
+                [data.orientation.x, data.orientation.y, data.orientation.z, data.orientation.w],
+                dtype=float,
+            )
         )
 
     def calculate_cable_length_from_motor_pos(self, motor_pos):
-        r = 0.025
         cable_lengths = self.init_cable_lens.copy()
         for i in range(min(len(cable_lengths), len(motor_pos))):
             motor_delta = (motor_pos[i] - self.init_motor_pos[i]) / 10000.0 * 2.0 * np.pi
             if not i % 2:
-                cable_lengths[i] = self.init_cable_lens[i] - motor_delta * r
+                cable_lengths[i] = self.init_cable_lens[i] - motor_delta * self.cable_radii[i]
             else:
-                cable_lengths[i] = self.init_cable_lens[i] + motor_delta * r
+                cable_lengths[i] = self.init_cable_lens[i] + motor_delta * self.cable_radii[i]
         return cable_lengths
 
     def set_motor_velo(self, motor_velo):
