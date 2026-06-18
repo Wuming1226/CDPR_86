@@ -11,7 +11,7 @@ from motor import Motor
 from codec import le_bytes_to_int
 
 from std_msgs.msg import Float32MultiArray
-from cdpr_86_actuator.msg import MotorPositionsStamped
+from cdpr_86_msg.msg import MotorPositionsStamped
 #from slave.srv import SetMotorVelo, SetMotorVeloResponse, GetMotorPos, GetMotorPosResponse
 
 
@@ -101,9 +101,7 @@ if __name__=="__main__":
     cdpr = CDPR()
 
     sync_hz = 200.0
-    sensor_hz = 200.0
     sync_period = 1.0 / sync_hz
-    sensor_period = 1.0 / sensor_hz
     pdo_window = 0.004  # TPDO should arrive shortly after each SYNC
     init_delay = 0.5   # wait for system to settle before latching init position
 
@@ -117,7 +115,6 @@ if __name__=="__main__":
     state_lock = threading.Lock()
 
     latest_pos = np.zeros(8, dtype=np.int64)
-    seen_once = np.zeros(8, dtype=bool)
     state = {
         "init_motor_pos": None,
         "start_time": time.monotonic(),
@@ -148,6 +145,16 @@ if __name__=="__main__":
         msg.positions = positions.astype(np.float32).tolist()
         return msg
 
+    def publish_complete_cycle(cycle_time: float, pos_snapshot: np.ndarray, init_pos_snapshot):
+        cdpr.motor_pos_abs_pub.publish(
+            make_motor_pos_msg(pos_snapshot, cycle_time)
+        )
+        if init_pos_snapshot is not None:
+            motor_pos_rel = (pos_snapshot - init_pos_snapshot) / cdpr._motor1.encoder_resolution * 2 * np.pi
+            cdpr.motor_pos_rel_pub.publish(
+                make_motor_pos_msg(motor_pos_rel, cycle_time)
+            )
+
     def tx_sync_loop():
         nonlocal_vars = {
             "next_sync_time": time.monotonic()
@@ -159,18 +166,62 @@ if __name__=="__main__":
                 continue
 
             with state_lock:
-                prev_sync_seq = state["current_sync_seq"]
-                prev_sync_time = state["last_sync_time"]
-                next_sync_seq = prev_sync_seq + 1
+                cycle_seq = state["current_sync_seq"]
+                cycle_time = state["last_sync_time"]
+
+            # Evaluate the current cycle before sending the next SYNC, so fast TPDOs
+            # from the upcoming SYNC cannot overwrite last_rx_sync_seq first.
+            if cycle_seq > 0:
+                with state_lock:
+                    state["total_cycles"] += 1
+                    missing = []
+                    for idx in range(8):
+                        got_same_seq = last_rx_sync_seq[idx] == cycle_seq
+                        got_in_window = got_same_seq and (0.0 <= (last_rx_arrival_time[idx] - cycle_time) <= pdo_window)
+                        if not got_in_window:
+                            missing.append(idx)
+                    if not missing:
+                        state["complete_cycles"] += 1
+                        pos_snapshot = latest_pos.astype(np.float64).copy()
+                        if state["init_motor_pos"] is None:
+                            startup_ready = (now - state["start_time"]) >= init_delay
+                            if startup_ready:
+                                state["init_motor_pos"] = pos_snapshot.copy()
+                                rospy.loginfo(
+                                    "Initial motor positions latched from synchronized TPDO cycle %d after %.2fs startup delay",
+                                    cycle_seq,
+                                    init_delay,
+                                )
+                        init_pos_snapshot = state["init_motor_pos"]
+                    else:
+                        for idx in missing:
+                            miss_per_motor[idx] += 1
+                        pos_snapshot = None
+                        init_pos_snapshot = None
+                    total_snapshot = state["total_cycles"]
+                    complete_snapshot = state["complete_cycles"]
+                    miss_snapshot = miss_per_motor.copy()
+
+                if pos_snapshot is not None:
+                    publish_complete_cycle(cycle_time, pos_snapshot, init_pos_snapshot)
+
+                if now - state["stats_last_time"] >= 1.0:
+                    state["stats_last_time"] = now
+                    if total_snapshot > 0:
+                        ratio = 100.0 * complete_snapshot / total_snapshot
+                        rospy.loginfo(
+                            "PDO cycles complete=%d/%d (%.1f%%), miss_per_motor=%s",
+                            complete_snapshot, total_snapshot, ratio, miss_snapshot.tolist()
+                        )
+
             try:
                 bus.send(sync_msg)
             except can.CanError as e:
                 rospy.logwarn("SYNC send failed: %s", e)
 
             with state_lock:
-                state["current_sync_seq"] = next_sync_seq
+                state["current_sync_seq"] = cycle_seq + 1
                 state["last_sync_time"] = time.monotonic()
-                sync_seq_sent = state["current_sync_seq"]
 
             if time.time() - cdpr.last_velo_callback_time > cdpr.max_interval:
                 if not state["timeout_stopped"]:
@@ -179,23 +230,6 @@ if __name__=="__main__":
                     rospy.logwarn("No velocity command, force stop all motors")
             else:
                 state["timeout_stopped"] = False
-
-            # Evaluate the previous sync cycle against a strict window,
-            # without blocking this TX loop.
-            if prev_sync_seq > 0:
-                with state_lock:
-                    state["total_cycles"] += 1
-                    missing = []
-                    for idx in range(8):
-                        got_same_seq = last_rx_sync_seq[idx] == prev_sync_seq
-                        got_in_window = got_same_seq and (0.0 <= (last_rx_arrival_time[idx] - prev_sync_time) <= pdo_window)
-                        if not got_in_window:
-                            missing.append(idx)
-                    if not missing:
-                        state["complete_cycles"] += 1
-                    else:
-                        for idx in missing:
-                            miss_per_motor[idx] += 1
 
             nonlocal_vars["next_sync_time"] += sync_period
 
@@ -215,70 +249,17 @@ if __name__=="__main__":
             recv_time = time.monotonic()
             with state_lock:
                 latest_pos[idx] = pos
-                seen_once[idx] = True
                 last_rx_sync_seq[idx] = state["current_sync_seq"]
                 last_rx_arrival_time[idx] = recv_time
-
-    def publish_loop():
-        nonlocal_vars = {
-            "next_pub_time": time.monotonic()
-        }
-        while running.is_set() and not rospy.is_shutdown():
-            now = time.monotonic()
-            if now < nonlocal_vars["next_pub_time"]:
-                time.sleep(min(0.001, nonlocal_vars["next_pub_time"] - now))
-                continue
-
-            with state_lock:
-                if state["init_motor_pos"] is None and np.all(seen_once):
-                    # Latch init position only when all motors are from the same SYNC cycle.
-                    # This avoids mixing values across different cycles at startup.
-                    startup_ready = (now - state["start_time"]) >= init_delay
-                    if startup_ready and np.all(last_rx_sync_seq == last_rx_sync_seq[0]) and last_rx_sync_seq[0] >= 0:
-                        state["init_motor_pos"] = latest_pos.astype(np.float64).copy()
-                        rospy.loginfo(
-                            "Initial motor positions latched from one synchronized TPDO cycle after %.2fs startup delay",
-                            init_delay
-                        )
-                pos_snapshot = latest_pos.astype(np.float64).copy()
-                init_pos_snapshot = state["init_motor_pos"]
-                sync_time_snapshot = state["last_sync_time"]
-                total_snapshot = state["total_cycles"]
-                complete_snapshot = state["complete_cycles"]
-                miss_snapshot = miss_per_motor.copy()
-
-            cdpr.motor_pos_abs_pub.publish(
-                make_motor_pos_msg(pos_snapshot, sync_time_snapshot)
-            )
-
-            if init_pos_snapshot is not None:
-                motor_pos_rel = (pos_snapshot - init_pos_snapshot) / cdpr._motor1.encoder_resolution * 2 * np.pi
-                cdpr.motor_pos_rel_pub.publish(
-                    make_motor_pos_msg(motor_pos_rel, sync_time_snapshot)
-                )
-
-            now_mono = time.monotonic()
-            if now_mono - state["stats_last_time"] >= 1.0:
-                state["stats_last_time"] = now_mono
-                if total_snapshot > 0:
-                    ratio = 100.0 * complete_snapshot / total_snapshot
-                    rospy.loginfo(
-                        "PDO cycles complete=%d/%d (%.1f%%), miss_per_motor=%s",
-                        complete_snapshot, total_snapshot, ratio, miss_snapshot.tolist()
-                    )
-
-            nonlocal_vars["next_pub_time"] += sensor_period
 
     try:
         tx_thread = threading.Thread(target=tx_sync_loop, name="tx_sync_loop", daemon=True)
         rx_thread = threading.Thread(target=rx_pdo_loop, name="rx_pdo_loop", daemon=True)
-        pub_thread = threading.Thread(target=publish_loop, name="publish_loop", daemon=True)
         tx_thread.start()
         rx_thread.start()
-        pub_thread.start()
 
         while not rospy.is_shutdown():
-            if not tx_thread.is_alive() or not rx_thread.is_alive() or not pub_thread.is_alive():
+            if not tx_thread.is_alive() or not rx_thread.is_alive():
                 rospy.logerr("Worker thread exited unexpectedly, shutting down.")
                 break
             time.sleep(0.1)
