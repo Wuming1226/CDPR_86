@@ -1,6 +1,74 @@
+# ROS / catkin workspace
 build/
 devel/
 install/
 logs/
 log/
+.catkin_workspace
 .catkin_tools/
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# CMake byproducts (in-place package builds)
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Runtime logs and rosbag recordings
+*.log
+*.out
+*.bag
+*.db3
+
+# Generated experiment data
+*.csv
+*.tsv
+*.json
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.txt
+!**/CMakeLists.txt
+!requirements.txt
+
+path_mix.txt
+trajectory*.txt
+
+data/
+datasets/
+records/
+recordings/
+outputs/
+plots/
+
+# Local experimental tracking scripts (host)
+src/cdpr_86_host/scripts/track_around.py
+src/cdpr_86_host/scripts/track_auto.py
+src/cdpr_86_host/scripts/track_len.py
+src/cdpr_86_host/scripts/track_test.py
+
+# Editor and OS noise
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

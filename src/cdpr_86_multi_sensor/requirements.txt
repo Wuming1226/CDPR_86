@@ -1,6 +1,0 @@
-# Python deps for cdpr_86_multi_sensor scripts (install with: pip3 install --user -r requirements.txt)
-pyrealsense2>=2.55.0
-
-# Already provided on this system via apt / system Python:
-# - opencv-python (python3-opencv)
-# - numpy, scipy, matplotlib

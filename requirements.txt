@@ -1,0 +1,16 @@
+# CDPR_86 Python dependencies (install: pip3 install --user -r requirements.txt)
+# ROS packages (rospy, std_msgs, etc.) come from catkin/rosdep, not pip.
+
+# host — EKF, calibration, plotting
+numpy
+scipy
+matplotlib
+
+# actuator — CAN motor interface
+python-can
+
+# multi_sensor — RealSense D455
+pyrealsense2>=2.55.0
+
+# Often available via apt on the dev machine:
+# - python3-opencv (opencv-python)
