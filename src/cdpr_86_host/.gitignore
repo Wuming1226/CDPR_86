@@ -1,0 +1,66 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# ROS/catkin build products
+build/
+devel/
+install/
+logs/
+log/
+.catkin_tools/
+
+# CMake byproducts, in case this package is built in-place
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Runtime logs and collected/generated data
+*.log
+*.out
+*.bag
+*.db3
+*.csv
+*.tsv
+*.txt
+*.json
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.png
+*.jpg
+*.jpeg
+*.pdf
+data/
+datasets/
+records/
+recordings/
+outputs/
+plots/
+path_mix.txt
+trajectory*.txt
+
+# Local/experimental tracking scripts
+scripts/track_around.py
+scripts/track_auto.py
+scripts/track_len.py
+scripts/track_test.py
+
+# Editor and OS noise
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store

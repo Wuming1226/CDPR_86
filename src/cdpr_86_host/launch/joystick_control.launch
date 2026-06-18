@@ -1,0 +1,34 @@
+<launch>
+  <arg name="joy_dev" default="/dev/input/js0" />
+  <arg name="joy_deadzone" default="0.3" />
+  <arg name="joy_autorepeat_rate" default="20.0" />
+
+  <arg name="joy_config" default="xbox_cdpr" />
+  <arg name="config_filepath" default="$(find cdpr_86_host)/config/$(arg joy_config).config.yaml" />
+
+  <arg name="cmd_vel_topic" default="cmd_vel" />
+
+  <arg name="control_period" default="0.05" />
+  <arg name="coil_radius" default="0.025" />
+  <arg name="motor_velo_limit" default="10.0" />
+  <arg name="cmd_timeout" default="0.5" />
+
+  <node pkg="joy" type="joy_node" name="joy_node" output="screen">
+    <param name="dev" value="$(arg joy_dev)" />
+    <param name="deadzone" value="$(arg joy_deadzone)" />
+    <param name="autorepeat_rate" value="$(arg joy_autorepeat_rate)" />
+  </node>
+
+  <node pkg="teleop_twist_joy" type="teleop_node" name="teleop_twist_joy" output="screen">
+    <rosparam command="load" file="$(arg config_filepath)" />
+    <remap from="cmd_vel" to="$(arg cmd_vel_topic)" />
+  </node>
+
+  <node pkg="cdpr_86_host" type="joystick_control.py" name="cdpr_control" output="screen">
+    <param name="control_period" value="$(arg control_period)" />
+    <param name="coil_radius" value="$(arg coil_radius)" />
+    <param name="motor_velo_limit" value="$(arg motor_velo_limit)" />
+    <param name="cmd_timeout" value="$(arg cmd_timeout)" />
+    <remap from="cmd_vel" to="$(arg cmd_vel_topic)" />
+  </node>
+</launch>
