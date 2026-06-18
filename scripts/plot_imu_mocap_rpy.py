@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Rolling-window plot: IMU vs mocap roll / pitch / yaw; optional extrinsic JSON export.
+Rolling-window plot: raw IMU, calibrated IMU, and mocap roll / pitch / yaw.
 
-On shutdown (default), estimates fixed R_imu_to_body from synced quaternions and writes
-cdpr_imu_extrinsic.json for use when imu_active / rpy_from_imu is enabled.
+Calibrated IMU uses cdpr_imu_extrinsic.json (same as EKF nodes).
 
 Usage:
   rosrun cdpr_86_host plot_imu_mocap_rpy.py
-  rosrun cdpr_86_host plot_imu_mocap_rpy.py _save_extrinsic_on_shutdown:=false
+  rosrun cdpr_86_host plot_imu_mocap_rpy.py _imu_extrinsic_file:=cdpr_imu_extrinsic.json
 """
 
 from __future__ import annotations
@@ -23,22 +22,14 @@ from geometry_msgs.msg import PoseStamped
 from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import Imu
 
-from imu_extrinsic import (
-    ImuExtrinsic,
-    default_extrinsic_path,
-    estimate_from_timestamped_quats,
-    load_imu_extrinsic,
-    nearest_indices,
-    normalize_quat,
-    resolve_extrinsic_path,
-    save_imu_extrinsic,
-)
+from imu_extrinsic import ImuExtrinsic, default_extrinsic_path, load_imu_extrinsic, resolve_extrinsic_path
 
 
 def quat_to_rpy(quat_xyzw: np.ndarray) -> np.ndarray:
-    q = normalize_quat(quat_xyzw)
-    if q is None:
+    q = np.asarray(quat_xyzw, dtype=float).reshape(4)
+    if not np.all(np.isfinite(q)) or np.linalg.norm(q) < 1e-12:
         return np.full(3, np.nan)
+    q = q / np.linalg.norm(q)
     yaw, pitch, roll = R.from_quat(q).as_euler("ZYX", degrees=False)
     return np.array([roll, pitch, yaw], dtype=float)
 
@@ -86,33 +77,21 @@ class RollingRpyBuffer:
         return t_arr, roll, pitch, yaw
 
 
-class RollingQuatBuffer:
-    def __init__(self, window_sec: float) -> None:
-        self.window_sec = window_sec
-        self.t: Deque[float] = deque()
-        self.q: Deque[np.ndarray] = deque()
-
-    def append(self, stamp_sec: float, quat_xyzw: np.ndarray) -> None:
-        q = normalize_quat(quat_xyzw)
-        if q is None:
-            return
-        self.t.append(stamp_sec)
-        self.q.append(q)
-        threshold = stamp_sec - self.window_sec
-        while self.t and self.t[0] < threshold:
-            self.t.popleft()
-            self.q.popleft()
-
-    def arrays(self) -> Tuple[np.ndarray, List[np.ndarray]]:
-        if not self.t:
-            return np.array([]), []
-        return np.asarray(self.t, dtype=float), list(self.q)
-
-
 def _stamp_sec(header) -> float:
     if header.stamp != rospy.Time():
         return header.stamp.to_sec()
     return rospy.Time.now().to_sec()
+
+
+def nearest_indices(t_query: np.ndarray, t_ref: np.ndarray) -> np.ndarray:
+    if t_query.size == 0 or t_ref.size == 0:
+        return np.array([], dtype=int)
+    idx = np.searchsorted(t_ref, t_query)
+    idx = np.clip(idx, 0, len(t_ref) - 1)
+    idx0 = np.clip(idx - 1, 0, len(t_ref) - 1)
+    left = np.abs(t_ref[idx0] - t_query)
+    right = np.abs(t_ref[idx] - t_query)
+    return np.where(left <= right, idx0, idx)
 
 
 class ImuMocapRpyPlotNode:
@@ -124,49 +103,29 @@ class ImuMocapRpyPlotNode:
         self.plot_in_degrees = bool(rospy.get_param("~plot_in_degrees", True))
         self.unwrap_angles = bool(rospy.get_param("~unwrap_angles", True))
         self.show_delta = bool(rospy.get_param("~show_delta", False))
-        self.save_extrinsic_on_shutdown = bool(rospy.get_param("~save_extrinsic_on_shutdown", True))
-        self.extrinsic_output = str(
-            rospy.get_param("~extrinsic_output", str(default_extrinsic_path()))
-        )
-        self.min_calib_samples = int(rospy.get_param("~min_calib_samples", 80))
-        self.max_sync_dt = float(rospy.get_param("~max_sync_dt", 0.05))
-        self.calib_window_sec = float(rospy.get_param("~calib_window_sec", self.window_sec))
         self.imu_extrinsic_file = str(
             rospy.get_param("~imu_extrinsic_file", str(default_extrinsic_path()))
         )
-        self.show_imu_calibrated = bool(rospy.get_param("~show_imu_calibrated", True))
-        self._imu_extrinsic: Optional[ImuExtrinsic] = None
-        if self.show_imu_calibrated:
-            ext_path = resolve_extrinsic_path(self.imu_extrinsic_file)
-            self._imu_extrinsic = load_imu_extrinsic(ext_path, required=False)
-            if self._imu_extrinsic is None:
-                rospy.logwarn("No IMU extrinsic at %s; imu_calib trace disabled.", ext_path)
-            else:
-                rospy.loginfo(
-                    "Loaded IMU extrinsic from %s (n=%d, residual_rms=%.4f deg)",
-                    ext_path,
-                    self._imu_extrinsic.n_samples,
-                    self._imu_extrinsic.residual_angle_deg_rms,
-                )
+        self._imu_extrinsic: Optional[ImuExtrinsic] = load_imu_extrinsic(
+            resolve_extrinsic_path(self.imu_extrinsic_file),
+            required=False,
+        )
 
         self.lock = threading.Lock()
         self.imu_buf = RollingRpyBuffer(self.window_sec)
         self.imu_calib_buf = RollingRpyBuffer(self.window_sec)
         self.mocap_buf = RollingRpyBuffer(self.window_sec)
-        self.imu_quat_buf = RollingQuatBuffer(self.calib_window_sec)
-        self.mocap_quat_buf = RollingQuatBuffer(self.calib_window_sec)
 
         rospy.Subscriber(self.imu_topic, Imu, self._imu_cb, queue_size=200)
         rospy.Subscriber(self.mocap_topic, PoseStamped, self._mocap_cb, queue_size=100)
-        rospy.on_shutdown(self._on_shutdown)
 
         nrows = 6 if self.show_delta else 3
         self.fig, axes = plt.subplots(nrows, 1, figsize=(12, 11 if nrows == 6 else 8), sharex=True)
         self.axes = np.atleast_1d(axes)
 
-        title = f"IMU vs Mocap RPY (rolling {self.window_sec:.0f}s)"
+        title = f"IMU / IMU_calib / Mocap RPY (rolling {self.window_sec:.0f}s)"
         if self.show_delta:
-            title += " + delta (IMU - mocap)"
+            title += " + delta"
         self.fig.suptitle(title)
 
         unit = "deg" if self.plot_in_degrees else "rad"
@@ -179,11 +138,10 @@ class ImuMocapRpyPlotNode:
             ax = self.axes[i]
             line_m, = ax.plot([], [], "b-", linewidth=1.5, label="mocap")
             line_i, = ax.plot([], [], "r-", linewidth=1.5, label="imu")
+            line_c, = ax.plot([], [], "g-", linewidth=1.5, label="imu_calib")
             self.lines_mocap.append(line_m)
             self.lines_imu.append(line_i)
-            if self._imu_extrinsic is not None:
-                line_c, = ax.plot([], [], "g-", linewidth=1.5, label="imu_calib")
-                self.lines_imu_calib.append(line_c)
+            self.lines_imu_calib.append(line_c)
             ax.set_ylabel(f"{names[i]} [{unit}]")
             ax.grid(True, alpha=0.3)
             if i == 0:
@@ -204,8 +162,14 @@ class ImuMocapRpyPlotNode:
 
         rospy.loginfo("plot_imu_mocap_rpy started.")
         rospy.loginfo("  imu=%s  mocap=%s  window=%.1fs  refresh=%.1fHz", self.imu_topic, self.mocap_topic, self.window_sec, self.refresh_hz)
-        rospy.loginfo("  save_extrinsic_on_shutdown=%s  output=%s", self.save_extrinsic_on_shutdown, self.extrinsic_output)
-        rospy.loginfo("  imu_extrinsic_file=%s  show_imu_calibrated=%s", self.imu_extrinsic_file, self.show_imu_calibrated)
+        if self._imu_extrinsic is not None:
+            rospy.loginfo(
+                "  extrinsic loaded: %s (residual_rms=%.4f deg)",
+                self.imu_extrinsic_file,
+                self._imu_extrinsic.residual_angle_deg_rms,
+            )
+        else:
+            rospy.logwarn("  no extrinsic at %s; imu_calib will be empty", self.imu_extrinsic_file)
 
     def _imu_cb(self, msg: Imu) -> None:
         quat = np.array(
@@ -218,7 +182,6 @@ class ImuMocapRpyPlotNode:
         stamp = _stamp_sec(msg.header)
         with self.lock:
             self.imu_buf.append(stamp, rpy)
-            self.imu_quat_buf.append(stamp, quat)
             if self._imu_extrinsic is not None:
                 q_calib = self._imu_extrinsic.apply_quat(quat)
                 if q_calib is not None:
@@ -228,52 +191,11 @@ class ImuMocapRpyPlotNode:
 
     def _mocap_cb(self, msg: PoseStamped) -> None:
         q = msg.pose.orientation
-        quat = np.array([q.x, q.y, q.z, q.w], dtype=float)
-        rpy = quat_to_rpy(quat)
+        rpy = quat_to_rpy(np.array([q.x, q.y, q.z, q.w], dtype=float))
         if not np.all(np.isfinite(rpy)):
             return
-        stamp = _stamp_sec(msg.header)
         with self.lock:
-            self.mocap_buf.append(stamp, rpy)
-            self.mocap_quat_buf.append(stamp, quat)
-
-    def save_extrinsic_json(self) -> None:
-        with self.lock:
-            t_i, q_i = self.imu_quat_buf.arrays()
-            t_m, q_m = self.mocap_quat_buf.arrays()
-        if len(q_i) < self.min_calib_samples:
-            rospy.logwarn(
-                "Skip extrinsic save: only %d IMU samples (need >= %d). Keep platform steady longer.",
-                len(q_i),
-                self.min_calib_samples,
-            )
-            return
-        ext = estimate_from_timestamped_quats(
-            t_i,
-            q_i,
-            t_m,
-            q_m,
-            max_time_offset_sec=self.max_sync_dt,
-        )
-        out_path = save_imu_extrinsic(ext, resolve_extrinsic_path(self.extrinsic_output))
-        rpy_deg = ext.r_imu_to_body.as_euler("ZYX", degrees=True)
-        rospy.loginfo(
-            "Saved IMU extrinsic -> %s (n=%d, residual_rms=%.4f deg, rpy_imu_to_body=[%.3f, %.3f, %.3f] deg)",
-            out_path,
-            ext.n_samples,
-            ext.residual_angle_deg_rms,
-            rpy_deg[2],
-            rpy_deg[1],
-            rpy_deg[0],
-        )
-
-    def _on_shutdown(self) -> None:
-        if not self.save_extrinsic_on_shutdown:
-            return
-        try:
-            self.save_extrinsic_json()
-        except Exception as exc:
-            rospy.logerr("Failed to save IMU extrinsic: %s", exc)
+            self.mocap_buf.append(_stamp_sec(msg.header), rpy)
 
     @staticmethod
     def _to_plot_units(roll: np.ndarray, pitch: np.ndarray, yaw: np.ndarray, degrees: bool):
@@ -379,14 +301,11 @@ class ImuMocapRpyPlotNode:
 
         for i in range(3):
             self.lines_imu[i].set_data(x_i, rpy_imu[i])
+            self.lines_imu_calib[i].set_data(x_c, rpy_imu_calib[i])
             self.lines_mocap[i].set_data(x_m, rpy_mocap[i])
             ax = self.axes[i]
             ax.set_xlim(-self.window_sec, 0.0)
-            ylists = [rpy_imu[i], rpy_mocap[i]]
-            if self.lines_imu_calib:
-                self.lines_imu_calib[i].set_data(x_c, rpy_imu_calib[i])
-                ylists.append(rpy_imu_calib[i])
-            self._set_ylim(ax, *ylists, min_span=min_span)
+            self._set_ylim(ax, rpy_imu[i], rpy_imu_calib[i], rpy_mocap[i], min_span=min_span)
 
         if self.show_delta and t_i.size and t_m.size:
             pick = nearest_indices(t_i, t_m)

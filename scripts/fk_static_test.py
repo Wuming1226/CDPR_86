@@ -5,7 +5,7 @@ import math
 import matplotlib.pyplot as plt
 import numpy as np
 import rospy
-from cdpr_86_host.msg import CableLengthsStamped
+from cdpr_86_msgs.msg import CableLengthsStamped
 from cdpr_euler_ekf import (
     CDPRGeometry,
     forward_kinematics_lm,

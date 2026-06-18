@@ -10,7 +10,7 @@
   <arg name="stop_remote_on_shutdown" default="true" />
 
   <!-- Second remote Raspberry Pi (required) -->
-  <arg name="remote2_host" default="192.168.5.105" />
+  <arg name="remote2_host" default="192.168.5.104" />
   <arg name="remote2_user" default="will" />
   <arg name="remote2_port" default="22" />
   <arg name="remote2_setup_script" default="~/CDPR_86/devel/setup.bash" />
@@ -21,15 +21,15 @@
 
   <!-- Readiness check -->
   <arg name="motor_topic" default="/motor_pos_abs" />
-  <arg name="motor_topic_wait_timeout" default="5.0" />
+  <arg name="motor_topic_wait_timeout" default="20.0" />
   <arg name="remote2_imu_topic" default="/imu" />
-  <arg name="remote2_imu_wait_timeout" default="5.0" />
+  <arg name="remote2_imu_wait_timeout" default="10.0" />
   <arg name="post_restart_wait_s" default="1.0" />
-  <arg name="fk_with_given_rpy" default="true" />
-  <arg name="rpy_from_imu" default="true" />
+  <arg name="fk_with_given_rpy" default="false" />
+  <arg name="rpy_from_imu" default="false" />
   <arg name="fk_use_prior" default="true" />
-  <arg name="fk_prior_pos_weight" default="5.0" />
-  <arg name="fk_prior_att_weight" default="10.0" />
+  <arg name="fk_prior_pos_weight" default=".0" />
+  <arg name="fk_prior_att_weight" default=".0" />
   <arg name="fk_topic" default="/fk_pose" />
   <arg name="cdpr_is_calibrated" default="true" />
   <arg name="cdpr_use_calibrated_cable_length" default="false" />

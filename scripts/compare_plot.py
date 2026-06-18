@@ -7,7 +7,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import rospy
-from cdpr_86_host.msg import CableLengthsStamped
+from cdpr_86_msgs.msg import CableLengthsStamped
 from cdpr_euler_ekf import cdpr_geometry_from_calibration_file, make_demo_geometry
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Imu

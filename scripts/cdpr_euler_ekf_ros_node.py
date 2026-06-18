@@ -6,7 +6,7 @@ from typing import Deque, Optional, Tuple
 import message_filters
 import numpy as np
 import rospy
-from cdpr_86_host.msg import CableLengthsStamped
+from cdpr_86_msgs.msg import CableLengthsStamped
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Imu
 from scipy.spatial.transform import Rotation as R
@@ -29,11 +29,6 @@ def _as_bool(v) -> bool:
     if isinstance(v, str):
         return v.strip().lower() in ("1", "true", "yes", "on")
     return bool(v)
-
-
-def _quat_valid(q: np.ndarray) -> bool:
-    q = np.asarray(q, dtype=float).reshape(4)
-    return bool(np.linalg.norm(q) > 1e-9 and np.isfinite(q).all())
 
 
 class RollingRateTracker:
@@ -240,26 +235,10 @@ class CDPREulerEkfNode:
 
     def _wait_valid_mocap_init_pose(self) -> Tuple[float, float, float, np.ndarray]:
         """Block until CDPR's mocap callback has a non-degenerate quaternion, or timeout."""
-        rate = rospy.Rate(20.0)
-        deadline = rospy.Time.now().to_sec() + self.mocap_init_timeout
-        identity = np.array([0.0, 0.0, 0.0, 1.0], dtype=float)
-        while not rospy.is_shutdown():
-            x, y, z, quat = self.cdpr.get_moving_platform_pose_from_mocap()
-            q = np.asarray(quat, dtype=float).reshape(4)
-            if _quat_valid(q):
-                rospy.loginfo("Mocap pose received for EKF init (valid quaternion).")
-                return float(x), float(y), float(z), q
-            if rospy.Time.now().to_sec() > deadline:
-                rospy.logwarn(
-                    "No valid mocap quaternion within %.1f s (VRPN may be down or not streaming); "
-                    "using identity orientation for EKF init. Position still from last mocap message.",
-                    self.mocap_init_timeout,
-                )
-                return float(x), float(y), float(z), identity.copy()
-            rate.sleep()
-        rospy.logwarn("Shutdown before valid mocap; EKF init uses identity orientation.")
-        x, y, z, _ = self.cdpr.get_moving_platform_pose_from_mocap()
-        return float(x), float(y), float(z), identity.copy()
+        return self.cdpr.wait_for_valid_mocap_pose(
+            timeout=self.mocap_init_timeout,
+            use_identity_on_timeout=True,
+        )
 
     def synced_callback(self, rpy_msg, cable_msg: CableLengthsStamped) -> None:
         arr = np.asarray(cable_msg.lengths, dtype=float)
@@ -272,6 +251,9 @@ class CDPREulerEkfNode:
             )
             return
         now = rpy_msg.header.stamp if rpy_msg.header.stamp != rospy.Time() else rospy.Time.now()
+        fk_stamp = (
+            cable_msg.header.stamp if cable_msg.header.stamp != rospy.Time() else now
+        )
         if self.last_imu_time is not None:
             dt = (now - self.last_imu_time).to_sec()
             if dt > 1e-5 and math.isfinite(dt):
@@ -394,7 +376,7 @@ class CDPREulerEkfNode:
 
         self.ekf.update_with_fk(rho_fk)
 
-        self.publish_fk_pose(now, rho_fk)
+        self.publish_fk_pose(fk_stamp, rho_fk)
         self.publish_pose(now)
         self._log_ekf_rate_throttled(now.to_sec())
 

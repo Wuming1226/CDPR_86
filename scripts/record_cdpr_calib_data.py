@@ -11,7 +11,7 @@ window of pose/IMU/encoder data and appends one line to a txt file:
 Default topics:
     /vrpn_client_node/cdpr/pose    geometry_msgs/PoseStamped
     /imu                          sensor_msgs/Imu (only if --imu-active)
-    /motor_pos_abs                std_msgs/Float32MultiArray
+    /motor_pos_abs                cdpr_86_msgs/MotorPositionsStamped
 
 Use --imu-active (default) to average yaw/pitch/roll from the IMU quaternion.
 Use --no-imu-active to average yaw/pitch/roll from the mocap pose quaternion
@@ -34,7 +34,7 @@ import rospy
 from geometry_msgs.msg import PoseStamped
 from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import Imu
-from std_msgs.msg import Float32MultiArray
+from cdpr_86_msgs.msg import MotorPositionsStamped
 
 from imu_extrinsic import ImuExtrinsic, load_extrinsic_for_node
 
@@ -120,7 +120,7 @@ class CDPRCalibrationRecorder:
         rospy.Subscriber(pose_topic, PoseStamped, self.pose_callback, queue_size=200)
         if self.imu_active:
             rospy.Subscriber(imu_topic, Imu, self.imu_callback, queue_size=200)
-        rospy.Subscriber(motor_abs_topic, Float32MultiArray, self.motor_abs_callback, queue_size=200)
+        rospy.Subscriber(motor_abs_topic, MotorPositionsStamped, self.motor_abs_callback, queue_size=200)
 
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -174,9 +174,9 @@ class CDPRCalibrationRecorder:
             self.imu_buf.append((stamp, ypr))
             trim_buffer(self.imu_buf, stamp, self.keep_sec)
 
-    def motor_abs_callback(self, msg: Float32MultiArray) -> None:
-        stamp = rospy.Time.now().to_sec()
-        theta = np.asarray(msg.data, dtype=float).reshape(-1)
+    def motor_abs_callback(self, msg: MotorPositionsStamped) -> None:
+        stamp = self.message_time(msg.header.stamp)
+        theta = np.asarray(msg.positions, dtype=float).reshape(-1)
         if theta.size < N_CABLES:
             rospy.logwarn_throttle(2.0, "motor_pos_abs has %d values, expected at least %d.", theta.size, N_CABLES)
             return

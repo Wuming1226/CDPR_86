@@ -8,7 +8,7 @@ import time
 
 import rospy
 from sensor_msgs.msg import Imu
-from std_msgs.msg import Float32MultiArray
+from cdpr_86_msgs.msg import MotorPositionsStamped
 
 
 def _as_bool(v) -> bool:
@@ -218,7 +218,7 @@ class RemoteMotorEkfBootstrap:
         try:
             rospy.wait_for_message(
                 self.motor_topic,
-                Float32MultiArray,
+                MotorPositionsStamped,
                 timeout=self.motor_topic_wait_timeout,
             )
         except rospy.ROSException as exc:

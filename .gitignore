@@ -45,6 +45,7 @@ Makefile
 data/
 datasets/
 records/
+recordings/
 outputs/
 plots/
 path_mix.txt

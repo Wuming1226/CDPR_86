@@ -1,6 +1,5 @@
 #! /usr/bin/env python3
 
-import time
 import numpy as np
 import rospy
 from scipy.spatial.transform import Rotation as R
@@ -13,7 +12,13 @@ from jacobian import get_jacobian
 
 class JoystickClosedLoopController:
     def __init__(self):
-        self.cdpr = CDPR(imu_active=False, is_calibrated=True, calibration_file="cdpr_kinematic_calib.json")
+        self.cdpr = CDPR(
+            imu_active=False,
+            is_calibrated=True,
+            calibration_file="cdpr_kinematic_calib.json",
+            publish_cable_lengths=False,
+            subscribe_motor_pos=False,
+        )
 
         self.control_period = rospy.get_param("~control_period", 1.0 / 15)
         self.coil_radius = rospy.get_param("~coil_radius", 0.025)
@@ -84,9 +89,9 @@ class JoystickClosedLoopController:
 
     def spin(self):
         rate = rospy.Rate(1.0 / self.control_period)
-        time.sleep(0.5)
 
         # Initialize target pose as current pose.
+        self.cdpr.wait_for_valid_mocap_pose()
         x, y, z, quat = self.cdpr.get_moving_platform_pose_from_mocap()
         self.pos_ref = np.array([x, y, z], dtype=float)
         self.rot_ref = R.from_quat(quat)

@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from scipy.spatial.transform import Rotation as R
 
-from cdpr_86_host.msg import CableLengthsStamped
+from cdpr_86_msgs.msg import CableLengthsStamped, MotorPositionsStamped
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Float32MultiArray
@@ -25,6 +25,11 @@ def _as_bool(v) -> bool:
     return bool(v)
 
 
+def quat_valid(q) -> bool:
+    q = np.asarray(q, dtype=float).reshape(4)
+    return bool(np.linalg.norm(q) > 1e-9 and np.isfinite(q).all())
+
+
 class CDPR:
 
     def __init__(
@@ -37,6 +42,8 @@ class CDPR:
         imu_extrinsic_file: str = None,
         apply_imu_extrinsic: bool = True,
         imu_extrinsic: ImuExtrinsic = None,
+        publish_cable_lengths: bool = True,
+        subscribe_motor_pos: bool = True,
     ):
         self.is_calibrated = bool(is_calibrated)
         if use_calibrated_cable_length is None:
@@ -100,6 +107,18 @@ class CDPR:
         except rospy.ROSException:
             pass
 
+        self.publish_cable_lengths = publish_cable_lengths
+        self.subscribe_motor_pos = subscribe_motor_pos
+        try:
+            self.publish_cable_lengths = _as_bool(
+                rospy.get_param("~publish_cable_lengths", self.publish_cable_lengths)
+            )
+            self.subscribe_motor_pos = _as_bool(
+                rospy.get_param("~subscribe_motor_pos", self.subscribe_motor_pos)
+            )
+        except rospy.ROSException:
+            pass
+
         self.imu_active = bool(imu_active)
         self.imu_topic = imu_topic
         self.imu_wait_timeout = float(rospy.get_param("~imu_wait_timeout", 2.0))
@@ -122,7 +141,13 @@ class CDPR:
             )
 
         self._velo_pub = rospy.Publisher('motor_velo', Float32MultiArray, queue_size=10)
-        self._cable_len_pub = rospy.Publisher('cable_lengths_measure', CableLengthsStamped, queue_size=50)
+        if self.publish_cable_lengths:
+            self._cable_len_pub = rospy.Publisher(
+                'cable_lengths_measure', CableLengthsStamped, queue_size=50
+            )
+        else:
+            self._cable_len_pub = None
+            rospy.loginfo("CDPR: cable_lengths_measure publishing disabled.")
 
         # subscriber and publisher
         self._moving_platform_pose = PoseStamped()  # 末端在基座坐标系的位姿
@@ -173,16 +198,25 @@ class CDPR:
             self.init_cable_length()
 
         self._motor_pos_received = False
-        rospy.Subscriber('motor_pos_abs', Float32MultiArray, self._motor_pos_callback, queue_size=1)
-        if not (self.is_calibrated and self.use_calibrated_cable_length):
-            while not rospy.is_shutdown() and not self._motor_pos_received:
-                rospy.sleep(0.01)
-            self.init_motor_pos = self.motor_pos.copy()
-            if self.is_calibrated and not self.use_calibrated_cable_length:
-                rospy.loginfo(
-                    "is_calibrated=true but use_calibrated_cable_length=false: "
-                    "initialized l0 from mocap and init_motor_pos from first motor_pos_abs."
-                )
+        if self.subscribe_motor_pos:
+            self.motor_pos_topic = rospy.get_param("~motor_pos_topic", "motor_pos_abs")
+            rospy.Subscriber(
+                self.motor_pos_topic,
+                MotorPositionsStamped,
+                self._motor_pos_callback,
+                queue_size=1,
+            )
+            if not (self.is_calibrated and self.use_calibrated_cable_length):
+                while not rospy.is_shutdown() and not self._motor_pos_received:
+                    rospy.sleep(0.01)
+                self.init_motor_pos = self.motor_pos.copy()
+                if self.is_calibrated and not self.use_calibrated_cable_length:
+                    rospy.loginfo(
+                        "is_calibrated=true but use_calibrated_cable_length=false: "
+                        "initialized l0 from mocap and init_motor_pos from first motor_pos_abs."
+                    )
+        else:
+            rospy.loginfo("CDPR: motor_pos subscription disabled.")
 
     def load_kinematic_calibration(self, calibration_file):
         calibration_path = Path(calibration_file).expanduser()
@@ -218,9 +252,7 @@ class CDPR:
         return calib
         
     def init_cable_length(self):
-        # calculate origin cable lengths
-        time.sleep(1)
-        x0, y0, z0, orient0 = self.get_moving_platform_pose_from_mocap()
+        x0, y0, z0, orient0 = self.wait_for_valid_mocap_pose(timeout=5.0)
         pos0 = np.array([x0, y0, z0])
 
         rot0 = R.from_quat(orient0)
@@ -235,6 +267,41 @@ class CDPR:
         self.init_cable_lens[6] = np.linalg.norm(pos0 - self._anchorA7 + b_matrix[6, :])
         self.init_cable_lens[7] = np.linalg.norm(pos0 - self._anchorA8 + b_matrix[7, :])
         print("init_cable_lens: {}".format(self.init_cable_lens))
+
+    def wait_for_valid_mocap_pose(
+        self,
+        timeout: float = 5.0,
+        use_identity_on_timeout: bool = False,
+    ):
+        """Block until mocap callback has a non-degenerate quaternion, or timeout."""
+        rate = rospy.Rate(20.0)
+        deadline = rospy.Time.now().to_sec() + float(timeout)
+        identity = np.array([0.0, 0.0, 0.0, 1.0], dtype=float)
+        while not rospy.is_shutdown():
+            x, y, z, quat = self.get_moving_platform_pose_from_mocap()
+            q = np.asarray(quat, dtype=float).reshape(4)
+            if quat_valid(q):
+                rospy.loginfo("CDPR: valid mocap pose received.")
+                return float(x), float(y), float(z), q
+            if rospy.Time.now().to_sec() > deadline:
+                if use_identity_on_timeout:
+                    rospy.logwarn(
+                        "No valid mocap quaternion within %.1f s; using identity orientation.",
+                        timeout,
+                    )
+                    return float(x), float(y), float(z), identity.copy()
+                raise RuntimeError(
+                    f"No valid mocap quaternion within {timeout:.1f} s "
+                    "(VRPN may be down or not streaming)."
+                )
+            rate.sleep()
+        x, y, z, quat = self.get_moving_platform_pose_from_mocap()
+        q = np.asarray(quat, dtype=float).reshape(4)
+        if quat_valid(q):
+            return float(x), float(y), float(z), q
+        if use_identity_on_timeout:
+            return float(x), float(y), float(z), identity.copy()
+        raise RuntimeError("Shutdown before valid mocap pose.")
 
     def _pose_callback(self, data):
         # if motion data is lost(999999), do not update
@@ -283,13 +350,18 @@ class CDPR:
     #         self._base_frame_pose.header.frame_id = data.header.frame_id
     #         self._base_frame_pose.header.stamp = data.header.stamp
 
-    def _motor_pos_callback(self, data):
-        self.motor_pos = np.array(data.data, dtype=float)
+    def _motor_pos_callback(self, data: MotorPositionsStamped):
+        self.motor_pos = np.array(data.positions, dtype=float)
         self._motor_pos_received = True
 
+        if not self.publish_cable_lengths or self._cable_len_pub is None:
+            return
+
         cable_msg = CableLengthsStamped()
-        cable_msg.header.stamp = rospy.Time.now()
-        cable_msg.header.frame_id = "world"
+        cable_msg.header.stamp = (
+            data.header.stamp if data.header.stamp != rospy.Time() else rospy.Time.now()
+        )
+        cable_msg.header.frame_id = data.header.frame_id or "world"
         cable_msg.lengths = self.calculate_cable_length_from_motor_pos(self.motor_pos).tolist()
         self._cable_len_pub.publish(cable_msg)
 
@@ -498,8 +570,8 @@ if __name__ == "__main__":
 
 
 
-    for i in range(4):
-        cdpr.set_motor_velo([0., 0.5, 0, 0, 0, 0, 0, 0])
+    for i in range(1):
+        cdpr.set_motor_velo([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5])
         time.sleep(0.2)
     cdpr.set_motor_velo([0, 0, 0, 0, 0, 0, 0, 0])
     print('end')

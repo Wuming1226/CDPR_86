@@ -29,6 +29,8 @@
     <param name="coil_radius" value="$(arg coil_radius)" />
     <param name="motor_velo_limit" value="$(arg motor_velo_limit)" />
     <param name="cmd_timeout" value="$(arg cmd_timeout)" />
+    <param name="publish_cable_lengths" value="false" />
+    <param name="subscribe_motor_pos" value="false" />
     <remap from="cmd_vel" to="$(arg cmd_vel_topic)" />
   </node>
 </launch>

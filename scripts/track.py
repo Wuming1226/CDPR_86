@@ -63,14 +63,20 @@ euler_save_path = folder + 'euler_' + time_str + '.txt'
 
 if __name__ == "__main__":
 
-    cdpr = CDPR(imu_active=False, is_calibrated=True, calibration_file='cdpr_kinematic_calib.json')
+    cdpr = CDPR(
+        imu_active=False,
+        is_calibrated=True,
+        calibration_file='cdpr_kinematic_calib.json',
+        publish_cable_lengths=False,
+        subscribe_motor_pos=False,
+    )
     if cdpr.imu_active:
         wait_for_stable_imu_pub(cdpr.imu_topic)
 
     T = 0.05     # control period
     rate = rospy.Rate(1/T)
 
-    time.sleep(0.5)
+    cdpr.wait_for_valid_mocap_pose()
 
     x_r_list, y_r_list, z_r_list = [], [], [],
     x_list, y_list, z_list = [], [], []
@@ -92,7 +98,7 @@ if __name__ == "__main__":
     start_euler = R.from_quat(quat0).as_euler('ZYX', degrees=False)
     start_point = np.concatenate([start_pos, start_euler])
     print(start_point)
-    way_point1 = start_point + np.array([-0., 0.2, -0., 0.0, 0.0, 0.0])
+    way_point1 = start_point + np.array([-0., 0., 0., 0.0, 0.0, 0.0])
     way_point1[3:6] = np.array([0, 0, 0]) / 180 * np.pi
     # way_point1[2] = 0.65
     # way_point1 = np.array([-1.1774, -0.7348, 0.72, 0, 0, 0])
