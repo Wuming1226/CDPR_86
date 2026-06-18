@@ -12,12 +12,10 @@ from jacobian import get_jacobian
 
 class JoystickClosedLoopController:
     def __init__(self):
-        self.cdpr = CDPR(
+        self.cdpr = CDPR.for_velocity_control(
             imu_active=False,
             is_calibrated=True,
             calibration_file="cdpr_kinematic_calib.json",
-            publish_cable_lengths=False,
-            subscribe_motor_pos=False,
         )
 
         self.control_period = rospy.get_param("~control_period", 1.0 / 15)
@@ -131,6 +129,7 @@ class JoystickClosedLoopController:
 
 
 if __name__ == "__main__":
+    rospy.init_node("cdpr_control", anonymous=False)
     controller = JoystickClosedLoopController()
     try:
         controller.spin()

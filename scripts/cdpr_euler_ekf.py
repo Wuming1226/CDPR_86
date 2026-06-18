@@ -1,11 +1,11 @@
-import json
 import math
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+from cdpr import RuntimeGeometry
 
 
 # Basic SO(3) helper used by both FK Jacobian and attitude kinematics.
@@ -67,20 +67,10 @@ def wrap_euler(theta: np.ndarray) -> np.ndarray:
     return out
 
 
-@dataclass
-class CDPRGeometry:
-    winches_a: np.ndarray  # (m, 3) in inertial frame a
-    attachments_b: np.ndarray  # (m, 3) in payload frame b
-
-    @property
-    def m(self) -> int:
-        return self.winches_a.shape[0]
-
-
 def cable_lengths_from_pose(
     r_zo_a: np.ndarray,
     theta_ba: np.ndarray,
-    geom: CDPRGeometry,
+    geom: RuntimeGeometry,
 ) -> np.ndarray:
     c_ba = euler321_to_c_ba(theta_ba)
     c_ab = c_ba.T
@@ -95,7 +85,7 @@ def cable_lengths_from_pose(
 def fk_residual_and_jacobian(
     rho: np.ndarray,
     lengths: np.ndarray,
-    geom: CDPRGeometry,
+    geom: RuntimeGeometry,
 ) -> Tuple[np.ndarray, np.ndarray]:
     # rho = [r_x, r_y, r_z, theta1, theta2, theta3]
     # fi = ||r_diwi^a|| - l_i
@@ -133,7 +123,7 @@ def fk_xyz_residual_and_jacobian(
     r_zo_a: np.ndarray,
     theta_ba: np.ndarray,
     lengths: np.ndarray,
-    geom: CDPRGeometry,
+    geom: RuntimeGeometry,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Cable residual/Jacobian for xyz-only FK with fixed attitude."""
     c_ab = euler321_to_c_ba(theta_ba).T
@@ -154,7 +144,7 @@ def forward_kinematics_lm_xyz_with_fixed_attitude(
     r0: np.ndarray,
     theta_ba: np.ndarray,
     lengths: np.ndarray,
-    geom: CDPRGeometry,
+    geom: RuntimeGeometry,
     damping: float = 1e-3,
     reg_weights: np.ndarray = None,
     max_iters: int = 20,
@@ -183,7 +173,7 @@ def fk_xyz_residual_and_jacobian(
     r_zo_a: np.ndarray,
     theta_ba: np.ndarray,
     lengths: np.ndarray,
-    geom: CDPRGeometry,
+    geom: RuntimeGeometry,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Cable residual/Jacobian for xyz-only FK with fixed attitude."""
     c_ab = euler321_to_c_ba(theta_ba).T
@@ -204,7 +194,7 @@ def forward_kinematics_lm_xyz_with_fixed_attitude(
     r0: np.ndarray,
     theta_ba: np.ndarray,
     lengths: np.ndarray,
-    geom: CDPRGeometry,
+    geom: RuntimeGeometry,
     damping: float = 1e-3,
     reg_weights: np.ndarray = None,
     max_iters: int = 20,
@@ -233,7 +223,7 @@ def forward_kinematics_lm_xyz_with_fixed_attitude_and_prior(
     r0: np.ndarray,
     theta_ba: np.ndarray,
     lengths: np.ndarray,
-    geom: CDPRGeometry,
+    geom: RuntimeGeometry,
     r_prior: np.ndarray,
     damping: float = 1e-3,
     reg_weights: np.ndarray = None,
@@ -271,7 +261,7 @@ def forward_kinematics_lm_xyz_with_fixed_attitude_and_prior(
 def forward_kinematics_lm(
     rho0: np.ndarray,
     lengths: np.ndarray,
-    geom: CDPRGeometry,
+    geom: RuntimeGeometry,
     damping: float = 1e-3,
     reg_weights: np.ndarray = None,
     max_iters: int = 20,
@@ -300,7 +290,7 @@ def forward_kinematics_lm(
 def forward_kinematics_lm_with_prior(
     rho0: np.ndarray,
     lengths: np.ndarray,
-    geom: CDPRGeometry,
+    geom: RuntimeGeometry,
     rho_prior: np.ndarray,
     damping: float = 1e-3,
     reg_weights: np.ndarray = None,
@@ -467,69 +457,33 @@ def cdpr_geometry_from_calibration_file(
     calibration_file: str,
     *,
     base_dir: Optional[Path] = None,
-) -> CDPRGeometry:
-    """Build ``CDPRGeometry`` from kinematic calibration JSON (``a``, ``b`` keys).
+) -> RuntimeGeometry:
+    """Build ``RuntimeGeometry`` from kinematic calibration JSON (``a``, ``b`` keys).
 
     Does not construct ``CDPR`` (no ROS publishers). Relative paths resolve like
-    ``cdpr.CDPR.load_kinematic_calibration``: non-absolute paths are under
-    ``base_dir`` (default: directory of this module).
+    ``cdpr.load_runtime_geometry``: non-absolute paths are under ``base_dir``
+    (default: directory of this module).
     """
-    path = Path(calibration_file).expanduser()
-    if not path.is_absolute():
-        root = base_dir if base_dir is not None else Path(__file__).resolve().parent
-        path = root / path
-    with path.open("r", encoding="utf-8") as f:
-        calib = json.load(f)
-    a = np.asarray(calib["a"], dtype=float).reshape(8, 3)
-    b = np.asarray(calib["b"], dtype=float).reshape(8, 3)
-    return CDPRGeometry(winches_a=a.copy(), attachments_b=b.copy())
+    from cdpr import load_runtime_geometry
+
+    return load_runtime_geometry(
+        is_calibrated=True,
+        calibration_file=calibration_file,
+        use_calibrated_cable_length=False,
+        base_dir=base_dir,
+    )
 
 
-_NOMINAL_WINCHES_A = np.array(
-    [
-        [-0.260, -0.243, 2.300],
-        [-0.361, -0.125, 2.300],
-        [-2.049, -0.089, 2.300],
-        [-2.169, -0.212, 2.300],
-        [-2.193, -1.225, 2.290],
-        [-2.084, -1.357, 2.300],
-        [-0.415, -1.384, 2.300],
-        [-0.290, -1.252, 2.300],
-    ]
-)
-_NOMINAL_ATTACHMENTS_B = np.array(
-    [
-        [0.184, -0.125, 0.110],
-        [-0.140, 0.169, -0.110],
-        [0.140, 0.169, 0.110],
-        [-0.184, -0.125, -0.110],
-        [-0.184, 0.125, 0.110],
-        [0.140, -0.169, -0.110],
-        [-0.140, -0.169, 0.110],
-        [0.184, 0.125, -0.110],
-    ]
-)
+def make_demo_geometry() -> RuntimeGeometry:
+    """Nominal CDPR geometry for FK/EKF demos and plotting."""
+    from cdpr import DEFAULT_CABLE_RADII, NOMINAL_ATTACHMENTS_B, NOMINAL_WINCHES_A
 
-
-def make_demo_geometry(use_ros_cdpr: bool = False) -> CDPRGeometry:
-    """Nominal CDPR geometry for FK/EKF demos and plotting.
-
-    By default this does **not** construct ``CDPR()`` (which registers ROS
-    publishers). Pass ``use_ros_cdpr=True`` only when you intentionally want
-    attachment matrices from a live ``CDPR`` instance.
-    """
-    if use_ros_cdpr:
-        try:
-            from cdpr import CDPR
-
-            cdpr = CDPR(imu_active=False)
-            winches, att = cdpr.get_cable_attachment_points()
-            return CDPRGeometry(winches_a=winches, attachments_b=att)
-        except Exception:
-            pass
-    return CDPRGeometry(
-        winches_a=_NOMINAL_WINCHES_A.copy(),
-        attachments_b=_NOMINAL_ATTACHMENTS_B.copy(),
+    return RuntimeGeometry(
+        a_matrix=NOMINAL_WINCHES_A.copy(),
+        b_matrix=NOMINAL_ATTACHMENTS_B.copy(),
+        cable_radii=DEFAULT_CABLE_RADII.copy(),
+        init_cable_lens=np.zeros(8),
+        init_motor_pos=np.zeros(8),
     )
 
 

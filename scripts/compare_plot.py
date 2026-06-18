@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import rospy
 from cdpr_86_msgs.msg import CableLengthsStamped
-from cdpr_euler_ekf import cdpr_geometry_from_calibration_file, make_demo_geometry
+from cdpr import load_runtime_geometry
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Imu
 from scipy.spatial.transform import Rotation as R
@@ -72,13 +72,12 @@ class PoseImuNavPlotNode:
         # Match cdpr_euler_ekf_ros_node: same ~is_calibrated / ~calibration_file (no CDPR() here → no extra pubs).
         self.is_calibrated = _as_bool(rospy.get_param("~is_calibrated", True))
         self.calibration_file = rospy.get_param("~calibration_file", "cdpr_kinematic_calib.json")
-        if self.is_calibrated:
-            self.geom = cdpr_geometry_from_calibration_file(
-                self.calibration_file,
-                base_dir=Path(__file__).resolve().parent,
-            )
-        else:
-            self.geom = make_demo_geometry(use_ros_cdpr=False)
+        self.geom = load_runtime_geometry(
+            is_calibrated=self.is_calibrated,
+            calibration_file=self.calibration_file,
+            use_calibrated_cable_length=False,
+            base_dir=Path(__file__).resolve().parent,
+        )
         rospy.loginfo(
             "compare_plot geometry: is_calibrated=%s file=%s",
             str(self.is_calibrated),

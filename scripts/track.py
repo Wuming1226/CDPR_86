@@ -63,12 +63,11 @@ euler_save_path = folder + 'euler_' + time_str + '.txt'
 
 if __name__ == "__main__":
 
-    cdpr = CDPR(
+    rospy.init_node("cdpr_control", anonymous=False)
+    cdpr = CDPR.for_velocity_control(
         imu_active=False,
         is_calibrated=True,
         calibration_file='cdpr_kinematic_calib.json',
-        publish_cable_lengths=False,
-        subscribe_motor_pos=False,
     )
     if cdpr.imu_active:
         wait_for_stable_imu_pub(cdpr.imu_topic)

@@ -14,7 +14,6 @@ from scipy.spatial.transform import Rotation as R
 from cdpr import CDPR
 from imu_extrinsic import ImuExtrinsic, load_extrinsic_for_node
 from cdpr_euler_ekf import (
-    CDPRGeometry,
     EulerEKFCDPR,
     forward_kinematics_lm,
     forward_kinematics_lm_with_prior,
@@ -92,7 +91,6 @@ class CDPREulerEkfNode:
         self.is_calibrated = _as_bool(rospy.get_param("~is_calibrated", True))
         self.use_calibrated_cable_length = _as_bool(rospy.get_param("~use_calibrated_cable_length", True))
         self.calibration_file = rospy.get_param("~calibration_file", "cdpr_kinematic_calib.json")
-        self.mocap_init_timeout = float(rospy.get_param("~mocap_init_timeout", 5.0))
         self.log_ekf_rate = _as_bool(rospy.get_param("~log_ekf_rate", True))
         self.rate_window_sec = float(rospy.get_param("~rate_window_sec", 10.0))
         self.rate_log_period = float(rospy.get_param("~rate_log_period", 2.0))
@@ -107,8 +105,9 @@ class CDPREulerEkfNode:
             )
 
         g_a = np.array([0.0, 0.0, -9.81], dtype=float)
-        self.cdpr = CDPR(
+        self.cdpr = CDPR.for_ekf(
             imu_active=self.rpy_from_imu,
+            imu_topic=self.imu_topic,
             is_calibrated=self.is_calibrated,
             use_calibrated_cable_length=self.use_calibrated_cable_length,
             calibration_file=(self.calibration_file if self.is_calibrated else None),
@@ -116,8 +115,7 @@ class CDPREulerEkfNode:
             apply_imu_extrinsic=self.apply_imu_extrinsic,
             imu_extrinsic_file=self.imu_extrinsic_file,
         )
-        wa, wb = self.cdpr.get_cable_attachment_points()
-        self.geom = CDPRGeometry(winches_a=wa, attachments_b=wb)
+        self.geom = self.cdpr.geom
         self.ekf = EulerEKFCDPR(dt=self.default_dt, g_a=g_a)
 
         x0 = np.zeros(15, dtype=float)
@@ -234,11 +232,8 @@ class CDPREulerEkfNode:
         )
 
     def _wait_valid_mocap_init_pose(self) -> Tuple[float, float, float, np.ndarray]:
-        """Block until CDPR's mocap callback has a non-degenerate quaternion, or timeout."""
-        return self.cdpr.wait_for_valid_mocap_pose(
-            timeout=self.mocap_init_timeout,
-            use_identity_on_timeout=True,
-        )
+        timeout = float(rospy.get_param("~cdpr_wait_timeout", 10.0))
+        return self.cdpr.wait_for_valid_mocap_pose(timeout=timeout)
 
     def synced_callback(self, rpy_msg, cable_msg: CableLengthsStamped) -> None:
         arr = np.asarray(cable_msg.lengths, dtype=float)

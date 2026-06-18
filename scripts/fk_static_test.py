@@ -6,8 +6,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import rospy
 from cdpr_86_msgs.msg import CableLengthsStamped
+from cdpr import (
+    DEFAULT_CABLE_RADII,
+    NOMINAL_ATTACHMENTS_B,
+    NOMINAL_WINCHES_A,
+    RuntimeGeometry,
+)
 from cdpr_euler_ekf import (
-    CDPRGeometry,
     forward_kinematics_lm,
     forward_kinematics_lm_with_prior,
     wrap_angle,
@@ -23,36 +28,14 @@ def pose_to_xyzrpy(msg: PoseStamped) -> np.ndarray:
     return np.array([p.x, p.y, p.z, roll, pitch, yaw], dtype=float)
 
 
-def make_static_geometry() -> CDPRGeometry:
-    # Use fixed geometry directly to avoid calling CDPR() inside make_demo_geometry(),
-    # which can block on runtime ROS dependencies during standalone tests.
-    winches = np.array(
-        [
-            [-0.260, -0.243, 2.300],
-            [-0.361, -0.125, 2.300],
-            [-2.049, -0.089, 2.300],
-            [-2.169, -0.212, 2.300],
-            [-2.193, -1.225, 2.290],
-            [-2.084, -1.357, 2.300],
-            [-0.415, -1.384, 2.300],
-            [-0.290, -1.252, 2.300],
-        ],
-        dtype=float,
+def make_static_geometry() -> RuntimeGeometry:
+    return RuntimeGeometry(
+        a_matrix=NOMINAL_WINCHES_A.copy(),
+        b_matrix=NOMINAL_ATTACHMENTS_B.copy(),
+        cable_radii=DEFAULT_CABLE_RADII.copy(),
+        init_cable_lens=np.zeros(8, dtype=float),
+        init_motor_pos=np.zeros(8, dtype=float),
     )
-    att = np.array(
-        [
-            [0.184, -0.125, 0.110],
-            [-0.140, 0.169, -0.110],
-            [0.140, 0.169, 0.110],
-            [-0.184, -0.125, -0.110],
-            [-0.184, 0.125, 0.110],
-            [0.140, -0.169, -0.110],
-            [-0.140, -0.169, 0.110],
-            [0.184, 0.125, -0.110],
-        ],
-        dtype=float,
-    )
-    return CDPRGeometry(winches_a=winches, attachments_b=att)
 
 
 def main() -> None:

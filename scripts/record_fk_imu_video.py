@@ -77,26 +77,6 @@ def _import_ros():
     return rospy, Imu, PoseStamped, CableLengthsStamped
 
 
-def _import_fk():
-    from cdpr_euler_ekf import (
-        CDPRGeometry,
-        cable_lengths_from_pose,
-        cdpr_geometry_from_calibration_file,
-        forward_kinematics_lm,
-        forward_kinematics_lm_with_prior,
-        make_demo_geometry,
-    )
-
-    return (
-        CDPRGeometry,
-        cable_lengths_from_pose,
-        cdpr_geometry_from_calibration_file,
-        forward_kinematics_lm,
-        forward_kinematics_lm_with_prior,
-        make_demo_geometry,
-    )
-
-
 def _timestamp_tag() -> str:
     return _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -602,25 +582,15 @@ class FkImuRecorder:
         self.plot_window_sec = float(plot_window_sec)
 
         self.rospy, self.Imu, self.PoseStamped, _CableLengthsStamped = _import_ros()
-        (
-            self._CDPRGeometry,
-            _cable_lengths_from_pose,
-            cdpr_geometry_from_calibration_file,
-            forward_kinematics_lm,
-            forward_kinematics_lm_with_prior,
-            make_demo_geometry,
-        ) = _import_fk()
-        self._cdpr_geometry_from_calibration_file = cdpr_geometry_from_calibration_file
-        self._make_demo_geometry = make_demo_geometry
+        from cdpr import load_runtime_geometry
 
         self.cdpr = None  # kept for backward-compatible metadata shape
-        if self.use_calibrated_geometry:
-            self.geom = self._cdpr_geometry_from_calibration_file(
-                self.calibration_file,
-                base_dir=Path(__file__).resolve().parent,
-            )
-        else:
-            self.geom = self._make_demo_geometry(use_ros_cdpr=False)
+        self.geom = load_runtime_geometry(
+            is_calibrated=self.use_calibrated_geometry,
+            calibration_file=self.calibration_file,
+            use_calibrated_cable_length=self.use_calibrated_cable_length,
+            base_dir=Path(__file__).resolve().parent,
+        )
 
         # FK seed [x, y, z, roll, pitch, yaw] in radians.
         if fk_seed_rho is not None:
