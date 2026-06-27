@@ -11,7 +11,7 @@ from motor import Motor
 from codec import le_bytes_to_int
 
 from std_msgs.msg import Float32MultiArray
-from cdpr_86_msg.msg import MotorPositionsStamped
+from cdpr_86_msgs.msg import MotorPositionsStamped
 #from slave.srv import SetMotorVelo, SetMotorVeloResponse, GetMotorPos, GetMotorPosResponse
 
 

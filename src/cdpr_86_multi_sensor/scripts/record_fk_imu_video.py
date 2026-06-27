@@ -65,7 +65,7 @@ def _import_ros():
         import rospy  # type: ignore
         from sensor_msgs.msg import Imu  # type: ignore
         from geometry_msgs.msg import PoseStamped  # type: ignore
-        from cdpr_86_msg.msg import MotorPositionsStamped  # type: ignore
+        from cdpr_86_msgs.msg import MotorPositionsStamped  # type: ignore
         from yesense_imu.msg import YesenseImuInertialData  # type: ignore
     except Exception as e:  # pragma: no cover
         raise RuntimeError(
